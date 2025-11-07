@@ -474,7 +474,7 @@ class IntradayOntologyEngine:
                 liquidity_zones.append((price_level, vol, zone_type))
         
         return liquidity_zones
-    
+        
     def _assess_intraday_risk(self, df: pd.DataFrame) -> RiskTier:
         """Dynamic risk assessment based on multiple factors"""
         # ATR-based volatility
@@ -483,7 +483,7 @@ class IntradayOntologyEngine:
         atr_pct = atr / price
         
         # Bollinger Band width
-        bb_width = (df["Upper_band"].iloc[-1] - df["Lower_band"].iloc[-1]) / df["BB_Middle"].iloc[-1]
+        bb_width = (df["BB_Upper"].iloc[-1] - df["BB_Lower"].iloc[-1]) / df["BB_Middle"].iloc[-1]
         
         # Composite risk score
         risk_score = 0
@@ -510,8 +510,7 @@ class IntradayOntologyEngine:
         elif risk_score >= 2:
             return RiskTier.NORMAL
         else:
-            return RiskTier.CALM
-    
+            return RiskTier.CALM    
     def _generate_intraday_signals(self, symbol: str, df: pd.DataFrame, 
                                   session: MarketSession, vwap_dev: float,
                                   orb_high: float, orb_low: float,
