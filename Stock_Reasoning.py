@@ -1,9 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[ ]:
-
-
 # ============================================================
 # PART 1: ENTERPRISE CONFIGURATION & ONTOLOGY FOUNDATION
 # ============================================================
@@ -87,7 +84,7 @@ TRADE = Namespace("https://ontology.tradingsystem.ai/trade/")
 RISK = Namespace("https://ontology.tradingsystem.ai/risk/")
 LIQ = Namespace("https://ontology.tradingsystem.ai/liquidity/")
 
-# Core ontology schema definition
+# Core ontology schema definition - FIXED: Added @prefix xsd declaration
 INTRADAY_ONTOLOGY_TTL = """
 @prefix stock: <https://ontology.tradingsystem.ai/stock/> .
 @prefix tech: <https://ontology.tradingsystem.ai/technical/> .
@@ -98,6 +95,7 @@ INTRADAY_ONTOLOGY_TTL = """
 @prefix liq: <https://ontology.tradingsystem.ai/liquidity/> .
 @prefix owl: <http://www.w3.org/2002/07/owl#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
 # Core Classes
 stock:TradableAsset a owl:Class ;
@@ -146,6 +144,7 @@ time:occursDuring a owl:ObjectProperty ;
     rdfs:range time:MarketSession .
 """
 
+# [REST OF YOUR CODE REMAINS EXACTLY THE SAME]
 # ─────────────────────────────────────────────
 # INSTITUTIONAL ONTOLOGY GRAPH MANAGER
 # ─────────────────────────────────────────────
@@ -1372,4 +1371,3 @@ if __name__ == "__main__":
     logger.info(f"Cache Directory: {config.cache_dir}")
     
     app.run_server(debug=False, port=8050)
-
