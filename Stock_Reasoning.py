@@ -1423,7 +1423,7 @@ def create_trade_plan(context: IntradayContext) -> html.Div:
             html.Span("Risk/Share:", className="text-muted small"),
             # ✅ FIXED: Added missing closing quote
             html.Span(f"${risk_per_share:.2f}", className="fw-bold float-end")
-        ], className="mb-2)
+        ], className="mb-2")
     ]
     
     return html.Div(plan_items)
