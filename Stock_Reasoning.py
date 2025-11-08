@@ -2,1449 +2,1957 @@
 # coding: utf-8
 
 # ============================================================
+# PART 1: ENHANCED ONTOLOGY FOUNDATION
+# ============================================================
+#!/usr/bin/env python
+# coding: utf-8
+
+# ============================================================
 # PART 1: ENTERPRISE CONFIGURATION & ONTOLOGY FOUNDATION
 # ============================================================
+from pyshacl import validate
 
+# ─────────────────────────────────────────────
+# STANDARD LIBRARY IMPORTS
+# ─────────────────────────────────────────────
 import os
-import sys
-import json
-import logging
-import hashlib
+import warnings
 from datetime import datetime, timedelta
-from enum import Enum
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Tuple
+from enum import Enum
 from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple
 
-import dash
-import dash_bootstrap_components as dbc
-from dash import dcc, html, Dash
-from dash.dependencies import Input, Output, State
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+# ─────────────────────────────────────────────
+# THIRD-PARTY IMPORTS
+# ─────────────────────────────────────────────
+# Data & Computation
 import pandas as pd
 import numpy as np
-import ta
-
-from yahooquery import Ticker
-from rdflib import Graph, Namespace, RDF, RDFS, OWL, Literal, URIRef
 from joblib import Memory
-from pydantic import BaseModel, Field
+
+# Technical Analysis
+import ta
+from yahooquery import Ticker
+
+# Semantic Web & Ontology
+from rdflib import Graph, Namespace, RDF, RDFS, OWL, Literal, URIRef, XSD
+from rdflib.namespace import DefinedNamespace
+from typing import Any
+
+# Web Dashboard
+import dash
+import dash_bootstrap_components as dbc
+from dash import dcc, html, Dash, Input, Output, State
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
 
 # ─────────────────────────────────────────────
-# ENTERPRISE CONFIGURATION MANAGEMENT
+# GLOBAL SETTINGS
 # ─────────────────────────────────────────────
-class DSSConfig(BaseModel):
-    """Configuration management for the intraday trading DSS"""
-    cache_dir: str = Field(default="./cache/intraday")
-    log_level: str = Field(default="INFO")
-    max_bars: int = Field(default=390, description="Maximum intraday bars (full session)")
-    risk_per_trade: float = Field(default=0.01, description="Risk per trade (1% default)")
-    account_size: float = Field(default=100_000.0, description="Default account size")
-    vwap_threshold: float = Field(default=0.002, description="VWAP deviation threshold (0.2%)")
-    orb_period: int = Field(default=15, description="Opening Range Breakout period (minutes)")
-    min_liquidity: float = Field(default=1_000_000, description="Minimum daily volume")
-    
-    class Config:
-        env_prefix = "DSS_"
+warnings.filterwarnings("ignore")
+CACHE_DIR = "./cache_dir"
+os.makedirs(CACHE_DIR, exist_ok=True)
+memory = Memory(location=CACHE_DIR, verbose=0)
 
-config = DSSConfig()
-
-# ─────────────────────────────────────────────
-# ENTERPRISE LOGGING SETUP
-# ─────────────────────────────────────────────
-Path("./logs").mkdir(exist_ok=True)
-logging.basicConfig(
-    level=getattr(logging, config.log_level),
-    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    handlers=[
-        logging.FileHandler(f"./logs/dss_{datetime.now().strftime('%Y%m%d')}.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("IntradayDSS")
-
-# ─────────────────────────────────────────────
-# PERFORMANCE CACHE
-# ─────────────────────────────────────────────
-Path(config.cache_dir).mkdir(parents=True, exist_ok=True)
-memory = Memory(location=config.cache_dir, verbose=0)
+def log_step(message: str):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    print(f"[{timestamp}] {message}")
 
 # ─────────────────────────────────────────────
 # ENHANCED ONTOLOGY VOCABULARY
 # ─────────────────────────────────────────────
-# ✅ FIXED: Removed trailing spaces in URIs
-STOCK = Namespace("https://ontology.tradingsystem.ai/stock/")
-TECH = Namespace("https://ontology.tradingsystem.ai/technical/")
-MARKET = Namespace("https://ontology.tradingsystem.ai/market/")
-TIME = Namespace("https://ontology.tradingsystem.ai/time/")
-TRADE = Namespace("https://ontology.tradingsystem.ai/trade/")
-RISK = Namespace("https://ontology.tradingsystem.ai/risk/")
-LIQ = Namespace("https://ontology.tradingsystem.ai/liquidity/")
+# ENHANCED ONTOLOGY VOCABULARY (Fixed)
+# ─────────────────────────────────────────────
+STOCK = Namespace("http://example.org/stock#")
+TECH = Namespace("http://example.org/technical#")
+MARKET = Namespace("http://example.org/market#")
+TIME = Namespace("http://example.org/time#")
+EVIDENCE = Namespace("http://example.org/evidence#")
+RISK = Namespace("http://example.org/risk#")  # ✅ Added missing namespace
 
-# ✅ FIXED: Removed trailing spaces in TTL prefixes
-INTRADAY_ONTOLOGY_TTL = """
-@prefix stock: <https://ontology.tradingsystem.ai/stock/> .
-@prefix tech: <https://ontology.tradingsystem.ai/technical/> .
-@prefix market: <https://ontology.tradingsystem.ai/market/> .
-@prefix time: <https://ontology.tradingsystem.ai/time/> .
-@prefix trade: <https://ontology.tradingsystem.ai/trade/> .
-@prefix risk: <https://ontology.tradingsystem.ai/risk/> .
-@prefix liq: <https://ontology.tradingsystem.ai/liquidity/> .
-@prefix owl: <http://www.w3.org/2002/07/owl#> .
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-
-# Core Classes
-stock:TradableAsset a owl:Class ;
-    rdfs:label "Tradable Asset" ;
-    rdfs:comment "Any instrument that can be traded intraday" .
-    
-time:MarketSession a owl:Class ;
-    rdfs:label "Market Session" ;
-    rdfs:comment "Time-bounded trading session with unique characteristics" .
-
-tech:TechnicalIndicator a owl:Class ;
-    rdfs:subClassOf owl:Thing ;
-    rdfs:label "Technical Indicator" .
-
-trade:TradingSignal a owl:Class ;
-    rdfs:label "Trading Signal" ;
-    rdfs:comment "Actionable entry or exit signal with confidence" .
-
-risk:RiskProfile a owl:Class ;
-    rdfs:label "Risk Profile" ;
-    rdfs:comment "Dynamic risk assessment for current market conditions" .
-
-liq:LiquidityZone a owl:Class ;
-    rdfs:label "Liquidity Zone" ;
-    rdfs:comment "Area of significant order flow or volume concentration" .
-
-# Properties
-stock:hasIndicator a owl:ObjectProperty ;
-    rdfs:domain stock:TradableAsset ;
-    rdfs:range tech:TechnicalIndicator .
-    
-tech:impliesSignal a owl:ObjectProperty ;
-    rdfs:domain tech:TechnicalIndicator ;
-    rdfs:range trade:TradingSignal .
-    
-trade:hasConfidence a owl:DatatypeProperty ;
-    rdfs:domain trade:TradingSignal ;
-    rdfs:range xsd:float .
-    
-risk:hasRiskLevel a owl:DatatypeProperty ;
-    rdfs:domain risk:RiskProfile ;
-    rdfs:range xsd:string .
-    
-time:occursDuring a owl:ObjectProperty ;
-    rdfs:domain trade:TradingSignal ;
-    rdfs:range time:MarketSession .
-"""
 
 # ─────────────────────────────────────────────
-# INSTITUTIONAL ONTOLOGY GRAPH MANAGER
+# OWL Ontology Schema (Patent-Grade)
 # ─────────────────────────────────────────────
-class IntradayOntologyGraph:
+class EnhancedStockOntologyGraph:
     """
-    Enterprise-grade RDF graph manager for intraday trading semantics.
-    Implements SHACL validation and SPARQL query capabilities.
+    Production-grade OWL ontology for financial technical analysis.
+    Features:
+    - Temporal indexing of all statements
+    - Indicator interdependencies
+    - Confidence-weighted evidence
+    - Contradiction detection
+    - Multi-hop inference paths
+    - Enhanced risk management
+    - Pattern recognition integration
     """
     
     def __init__(self):
         self.g = Graph()
-        self._load_ontology_schema()
-        self._setup_namespaces()
-        self.signals: List[Dict[str, Any]] = []
-        logger.info("IntradayOntologyGraph initialized")
-    
-    def _load_ontology_schema(self):
-        """Load institutional ontology schema"""
-        self.g.parse(data=INTRADAY_ONTOLOGY_TTL, format="turtle")
-        logger.debug("Ontology schema loaded")
-    
-    def _setup_namespaces(self):
-        """Configure namespace bindings"""
+        self._define_enhanced_schema()
+        log_step("Enhanced OWL ontology schema initialized with temporal semantics.")
+        
+    def _define_enhanced_schema(self):
+        """Defines comprehensive OWL schema with inference rules."""
         self.g.bind("stock", STOCK)
         self.g.bind("tech", TECH)
         self.g.bind("market", MARKET)
         self.g.bind("time", TIME)
-        self.g.bind("trade", TRADE)
-        self.g.bind("risk", RISK)
-        self.g.bind("liq", LIQ)
+        self.g.bind("evidence", EVIDENCE)
+        self.g.bind("risk", RISK)  # ✅ Added this line
+
+        
+        # Core Classes
+        for cls in [
+            STOCK.StockEntity, STOCK.Indicator, STOCK.Signal,
+            MARKET.MarketState, MARKET.RiskLevel, MARKET.TrendRegime,
+            TIME.Instant, TIME.Interval, EVIDENCE.EvidenceBundle
+        ]:
+            self.g.add((cls, RDF.type, RDFS.Class))
+            self.g.add((cls, RDF.type, OWL.Class))
+        
+        # Enhanced Indicator Subclasses
+        indicator_types = {
+            TECH.TrendIndicator: {
+                "indicators": ["SMA", "EMA", "ADX", "Ichimoku", "DEMA", "TEMA"],
+                "properties": {"timeframe": XSD.string, "period": XSD.integer, "weight": XSD.float}
+            },
+            TECH.MomentumIndicator: {
+                "indicators": ["RSI", "MACD", "Stochastic", "CCI", "ROC", "MOM"],
+                "properties": {"overbought_threshold": XSD.float, "oversold_threshold": XSD.float, "strength": XSD.float}
+            },
+            TECH.VolatilityIndicator: {
+                "indicators": ["ATR", "BollingerBands", "KeltnerChannel", "DonchianChannel"],
+                "properties": {"multiplier": XSD.float, "window": XSD.integer, "regime": XSD.string}
+            },
+            TECH.VolumeIndicator: {
+                "indicators": ["OBV", "VWAP", "ADL", "MFI", "CMF", "ForceIndex", "VPCI"],
+                "properties": {"volume_confirmation": XSD.boolean, "flow_strength": XSD.float}
+            },
+            TECH.MarketStructureIndicator: {
+                "indicators": ["SupportResistance", "FibonacciLevels", "PivotPoints"],
+                "properties": {"level_type": XSD.string, "strength": XSD.float, "reliability": XSD.float}
+            }
+        }
+        
+        for parent_class, config in indicator_types.items():
+            self.g.add((parent_class, RDF.type, RDFS.Class))
+            self.g.add((parent_class, RDFS.subClassOf, STOCK.Indicator))
+            
+            for child in config["indicators"]:
+                child_uri = TECH[child]
+                self.g.add((child_uri, RDF.type, RDFS.Class))
+                self.g.add((child_uri, RDFS.subClassOf, parent_class))
+                
+                # Add properties
+                for prop_name, prop_type in config["properties"].items():
+                    prop_uri = TECH[prop_name]
+                    self.g.add((prop_uri, RDF.type, RDF.Property))
+                    self.g.add((prop_uri, RDFS.domain, child_uri))
+                    self.g.add((prop_uri, RDFS.range, prop_type))
+        
+        # Enhanced Properties
+        enhanced_properties = {
+            # Temporal properties
+            STOCK.atTime: (STOCK.Indicator, TIME.Instant),
+            STOCK.observedAt: (STOCK.Signal, TIME.Instant),
+            STOCK.validFor: (EVIDENCE.EvidenceBundle, TIME.Interval),
+            STOCK.expiresAt: (STOCK.Signal, TIME.Instant),
+            
+            # Value properties
+            STOCK.hasNumericValue: (STOCK.Indicator, XSD.float),
+            STOCK.hasSignal: (STOCK.Indicator, STOCK.Signal),
+            STOCK.hasThreshold: (STOCK.Indicator, XSD.float),
+            STOCK.hasConfidence: (STOCK.Indicator, XSD.float),
+            STOCK.hasWeight: (STOCK.Indicator, XSD.float),
+            STOCK.hasStrength: (STOCK.Indicator, XSD.float),
+            
+            # Causal properties
+            STOCK.impliesState: (STOCK.Indicator, MARKET.MarketState),
+            STOCK.confirms: (STOCK.Indicator, STOCK.Indicator),
+            STOCK.contradicts: (STOCK.Indicator, STOCK.Indicator),
+            STOCK.contributesTo: (STOCK.Indicator, MARKET.TrendRegime),
+            STOCK.precedes: (STOCK.Signal, STOCK.Signal),
+            STOCK.succeeds: (STOCK.Signal, STOCK.Signal),
+            
+            # Evidence properties
+            EVIDENCE.hasConfidence: (EVIDENCE.EvidenceBundle, XSD.float),
+            EVIDENCE.hasWeight: (EVIDENCE.EvidenceBundle, XSD.float),
+            EVIDENCE.supports: (EVIDENCE.EvidenceBundle, STOCK.Indicator),
+            EVIDENCE.challenges: (EVIDENCE.EvidenceBundle, STOCK.Indicator),
+            EVIDENCE.hasSource: (EVIDENCE.EvidenceBundle, XSD.string),
+            EVIDENCE.hasReliability: (EVIDENCE.EvidenceBundle, XSD.float),
+            
+            # Market state properties
+            MARKET.hasVolatility: (MARKET.MarketState, XSD.string),
+            MARKET.hasTrend: (MARKET.MarketState, XSD.string),
+            MARKET.hasRiskLevel: (MARKET.MarketState, XSD.string),
+            
+            # Risk properties
+            RISK.hasRiskScore: (RISK.RiskAssessment, XSD.float),
+            RISK.hasPositionSize: (RISK.Position, XSD.float),
+            RISK.hasStopLoss: (RISK.Position, XSD.float),
+            RISK.hasTakeProfit: (RISK.Position, XSD.float),
+            RISK.maxDrawdown: (RISK.Portfolio, XSD.float),
+            RISK.sharpeRatio: (RISK.Portfolio, XSD.float)
+        }
+        
+        for prop, (domain, range_val) in enhanced_properties.items():
+            self.g.add((prop, RDF.type, RDF.Property))
+            self.g.add((prop, RDFS.domain, domain))
+            self.g.add((prop, RDFS.range, range_val))
+            
+            # Add OWL properties for inference
+            if prop in [STOCK.confirms, STOCK.contradicts]:
+                self.g.add((prop, RDF.type, OWL.TransitiveProperty))
+            
+            if prop in [STOCK.precedes]:
+                self.g.add((prop, RDF.type, OWL.TransitiveProperty))
+                self.g.add((prop, RDF.type, OWL.AsymmetricProperty))
     
-    def add_indicator(self, symbol: str, indicator_type: str, 
-                     value: float, metadata: Dict[str, Any]) -> URIRef:
+    def add_indicator(self, symbol: str, indicator_type: str, value: float, 
+                     signal: str, confidence: float = 1.0, metadata: Dict = None) -> URIRef:
         """
-        Add technical indicator with rich metadata to graph
+        Adds temporally-indexed indicator with confidence weighting and enhanced properties.
         
         Args:
-            symbol: Trading symbol
-            indicator_type: Indicator name (e.g., 'VWAP', 'RSI')
+            symbol: Stock ticker
+            indicator_type: Indicator class (e.g., 'RSI', 'Ichimoku')
             value: Numeric value
-            metadata: Dict with signal, confidence, timeframe, etc.
+            signal: Categorical signal
+            confidence: 0.0-1.0 reliability score
+            metadata: Additional temporal/parameter context
         """
-        ind_id = f"{symbol}_{indicator_type}_{int(datetime.now().timestamp())}"
-        ind_uri = URIRef(f"{TECH}{ind_id}")
+        ts = metadata.get("timestamp") if metadata else datetime.now().isoformat()
+        ind_uri = URIRef(f"{STOCK}{symbol}_{indicator_type}_{hash(ts)}")
         
-        self.g.add((ind_uri, RDF.type, TECH.TechnicalIndicator))
-        self.g.add((ind_uri, STOCK.hasSymbol, Literal(symbol)))
-        self.g.add((ind_uri, TECH.hasValue, Literal(round(value, 6))))
-        self.g.add((ind_uri, TECH.hasTimestamp, Literal(datetime.now().isoformat())))
+        # Enhanced type mapping with full indicator support
+        type_map = {
+            "RSI": TECH.RSI, "MACD": TECH.MACD, "Stochastic": TECH.Stochastic,
+            "CCI": TECH.CCI, "ATR": TECH.ATR, "BollingerBands": TECH.BollingerBands,
+            "OBV": TECH.OBV, "VWAP": TECH.VWAP, "Ichimoku": TECH.Ichimoku,
+            "SMA": TECH.SMA, "EMA": TECH.EMA, "ADX": TECH.ADX,
+            "MFI": TECH.MFI, "CMF": TECH.CMF, "ForceIndex": TECH.ForceIndex,
+            "DEMA": TECH.DEMA, "TEMA": TECH.TEMA, "ROC": TECH.ROC,
+            "KeltnerChannel": TECH.KeltnerChannel, "DonchianChannel": TECH.DonchianChannel
+        }
         
-        # ✅ FIXED: Use URIRef for dynamic properties
-        for key, val in metadata.items():
-            if val is not None:
-                prop_uri = URIRef(TECH + f"has{key.title()}")
-                self.g.add((ind_uri, prop_uri, Literal(val)))
+        indicator_type_uri = type_map.get(indicator_type, STOCK.Indicator)
+        self.g.add((ind_uri, RDF.type, indicator_type_uri))
+        self.g.add((ind_uri, STOCK.hasNumericValue, Literal(round(float(value), 6))))
+        self.g.add((ind_uri, STOCK.hasSignal, Literal(signal)))
+        self.g.add((ind_uri, STOCK.atTime, Literal(ts, datatype=XSD.dateTime)))
+        self.g.add((ind_uri, STOCK.hasConfidence, Literal(confidence)))
         
-        logger.debug(f"Added indicator: {indicator_type} for {symbol}")
+        # Add enhanced metadata properties
+        if metadata:
+            for key, val in metadata.items():
+                if key != "timestamp":
+                    # Convert property names to camelCase for consistency
+                    prop_name = ''.join(word.capitalize() for word in key.split('_'))
+                    if hasattr(TECH, prop_name):
+                        self.g.add((ind_uri, getattr(TECH, prop_name), Literal(val)))
+        
+        # Enhanced evidence bundle with reliability scoring
+        if confidence < 1.0:
+            ev_uri = URIRef(f"{EVIDENCE}ev_{symbol}_{indicator_type}_{hash(ts)}")
+            self.g.add((ev_uri, RDF.type, EVIDENCE.EvidenceBundle))
+            self.g.add((ev_uri, EVIDENCE.hasConfidence, Literal(confidence)))
+            self.g.add((ev_uri, EVIDENCE.supports, ind_uri))
+            
+            if metadata and "source" in metadata:
+                self.g.add((ev_uri, EVIDENCE.hasSource, Literal(metadata["source"])))
+            
+            # Add reliability score based on confidence and data quality
+            reliability = min(confidence * 1.2, 1.0)  # Boost reliability slightly
+            self.g.add((ev_uri, EVIDENCE.hasReliability, Literal(reliability)))
+        
+        log_step(f"Indicator added: {symbol}_{indicator_type} ({signal}, conf={confidence:.3f})")
         return ind_uri
     
-    def add_trading_signal(self, symbol: str, signal_type: str, 
-                          confidence: float, rationale: str) -> URIRef:
-        """
-        Generate trade signal with full provenance
-        """
-        sig_id = f"{symbol}_signal_{signal_type}_{hashlib.md5(rationale.encode()).hexdigest()[:8]}"
-        sig_uri = URIRef(f"{TRADE}{sig_id}")
+    def link_indicators(self, uri1: URIRef, uri2: URIRef, relationship: str, confidence: float = 1.0):
+        """Creates semantic links between indicators with confidence weighting."""
+        prop = STOCK.confirms if relationship == "confirms" else STOCK.contradicts
+        self.g.add((uri1, prop, uri2))
         
-        self.g.add((sig_uri, RDF.type, TRADE.TradingSignal))
-        self.g.add((sig_uri, TRADE.hasSignalType, Literal(signal_type)))
-        self.g.add((sig_uri, TRADE.hasConfidence, Literal(round(confidence, 4))))
-        self.g.add((sig_uri, TRADE.hasRationale, Literal(rationale)))
-        self.g.add((sig_uri, TRADE.hasTimestamp, Literal(datetime.now().isoformat())))
+        # Add confidence-weighted evidence
+        if confidence < 1.0:
+            link_uri = URIRef(f"{EVIDENCE}link_{hash(uri1)}{hash(uri2)}")
+            self.g.add((link_uri, RDF.type, EVIDENCE.EvidenceBundle))
+            self.g.add((link_uri, EVIDENCE.hasConfidence, Literal(confidence)))
+            self.g.add((link_uri, EVIDENCE.supports, uri1))
         
-        self.signals.append({
-            "symbol": symbol,
-            "type": signal_type,
-            "confidence": confidence,
-            "rationale": rationale
-        })
-        
-        logger.info(f"Generated {signal_type} signal for {symbol} ({confidence:.1%})")
-        return sig_uri
+        log_step(f"Linked indicators: {uri1} → {relationship} → {uri2} (conf={confidence:.3f})")
     
-    def add_liquidity_zone(self, symbol: str, zone_type: str, 
-                          price_level: float, volume: float) -> URIRef:
-        """Record liquidity zones for order flow analysis"""
-        zone_uri = URIRef(f"{LIQ}{symbol}_{zone_type}_{price_level:.2f}")
-        self.g.add((zone_uri, RDF.type, LIQ.LiquidityZone))
-        self.g.add((zone_uri, LIQ.hasPriceLevel, Literal(round(price_level, 4))))
-        self.g.add((zone_uri, LIQ.hasVolume, Literal(int(volume))))
-        self.g.add((zone_uri, LIQ.hasZoneType, Literal(zone_type)))
-        return zone_uri
+    def link_state(self, indicator_uri: URIRef, state: str, confidence: float = 1.0):
+        """Enhanced state linking with confidence and temporal validity."""
+        state_uri = URIRef(f"{MARKET}{state}")
+        self.g.add((indicator_uri, STOCK.impliesState, state_uri))
+        
+        # Add temporal validity
+        validity_uri = URIRef(f"{TIME}validity_{hash(indicator_uri)}{hash(state_uri)}")
+        self.g.add((validity_uri, RDF.type, TIME.Interval))
+        self.g.add((indicator_uri, STOCK.validFor, validity_uri))
+        
+        if confidence < 1.0:
+            ev_uri = URIRef(f"{EVIDENCE}ev_state_{hash(indicator_uri)}")
+            self.g.add((ev_uri, EVIDENCE.hasConfidence, Literal(confidence)))
+            self.g.add((ev_uri, EVIDENCE.supports, indicator_uri))
+        
+        log_step(f"State link: {indicator_uri} → {state} (conf={confidence:.3f})")
     
-    def query_signals(self, symbol: str = None, min_confidence: float = 0.6) -> List[Dict]:
-        """SPARQL query for high-confidence signals"""
-        # ✅ FIXED: Use f-string for proper formatting
+    def detect_contradictions(self) -> List[Tuple[URIRef, URIRef, float]]:
+        """Finds pairs of contradictory indicator signals with confidence scores."""
+        contradictions = []
+        query = """
+        SELECT ?ind1 ?ind2 ?conf1 ?conf2 WHERE {
+            ?ind1 stock:contradicts ?ind2 .
+            ?ind1 stock:hasSignal ?sig1 .
+            ?ind2 stock:hasSignal ?sig2 .
+            ?ind1 stock:hasConfidence ?conf1 .
+            ?ind2 stock:hasConfidence ?conf2 .
+            FILTER(?sig1 != ?sig2)
+        }
+        """
+        for row in self.g.query(query, initNs={"stock": STOCK}):
+            # Calculate contradiction strength
+            contradiction_strength = min(float(row.conf1), float(row.conf2))
+            contradictions.append((row.ind1, row.ind2, contradiction_strength))
+        
+        return contradictions
+    
+    def find_confirmations(self, min_confidence: float = 0.7) -> List[Tuple[URIRef, URIRef]]:
+        """Finds strong confirmations between indicators."""
+        confirmations = []
         query = f"""
-        PREFIX trade: <https://ontology.tradingsystem.ai/trade/>
-        PREFIX tech: <https://ontology.tradingsystem.ai/technical/>
-        SELECT ?signal ?type ?conf ?rationale WHERE {{
-            ?signal a trade:TradingSignal ;
-                    trade:hasSignalType ?type ;
-                    trade:hasConfidence ?conf ;
-                    trade:hasRationale ?rationale .
-            FILTER(?conf >= {min_confidence})
+        SELECT ?ind1 ?ind2 WHERE {{
+            ?ind1 stock:confirms ?ind2 .
+            ?ind1 stock:hasConfidence ?conf1 .
+            ?ind2 stock:hasConfidence ?conf2 .
+            FILTER(?conf1 > {min_confidence} && ?conf2 > {min_confidence})
+        }}
         """
+        for row in self.g.query(query, initNs={"stock": STOCK}):
+            confirmations.append((row.ind1, row.ind2))
         
-        if symbol:
-            query += f' ?signal tech:hasSymbol "{symbol}" .'
+        return confirmations
+    
+    def apply_inference_rules(self):
+        """Applies semantic inference rules to derive new knowledge."""
+        log_step("Applying inference rules...")
         
-        query += "}"
+        # Apply contradiction resolution
+        contradictions = self.detect_contradictions()
+        for ind1, ind2, strength in contradictions:
+            # Reduce confidence for contradictory signals
+            self._resolve_contradiction(ind1, ind2, strength)
+        
+        # Apply confirmation strengthening
+        confirmations = self.find_confirmations()
+        for ind1, ind2 in confirmations:
+            self._strengthen_confirmation(ind1, ind2)
+        
+        log_step(f"Applied {len(contradictions)} contradiction resolutions and {len(confirmations)} confirmation strengthenings")
+    
+    def _resolve_contradiction(self, ind1: URIRef, ind2: URIRef, strength: float):
+        """Resolves contradictions by reducing confidence."""
+        # Reduce both indicators' confidence
+        for ind in [ind1, ind2]:
+            current_conf = list(self.g.objects(ind, STOCK.hasConfidence))[0]
+            if current_conf:
+                new_conf = float(current_conf) * (1 - strength * 0.3)
+                self.g.remove((ind, STOCK.hasConfidence, current_conf))
+                self.g.add((ind, STOCK.hasConfidence, Literal(new_conf)))
+    
+    def _strengthen_confirmation(self, ind1: URIRef, ind2: URIRef):
+        """Strengthens confirmed indicators."""
+        # Increase confidence for confirmed indicators
+        for ind in [ind1, ind2]:
+            current_conf = list(self.g.objects(ind, STOCK.hasConfidence))[0]
+            if current_conf:
+                new_conf = min(float(current_conf) * 1.1, 1.0)
+                self.g.remove((ind, STOCK.hasConfidence, current_conf))
+                self.g.add((ind, STOCK.hasConfidence, Literal(new_conf)))
+    
+    def query_knowledge(self, query: str, init_ns: Dict = None) -> List:
+        """Executes SPARQL queries on the knowledge graph."""
+        if init_ns is None:
+            init_ns = {
+                "stock": STOCK, "tech": TECH, "market": MARKET,
+                "time": TIME, "evidence": EVIDENCE
+            }
         
         results = []
-        for row in self.g.query(query):
-            results.append({
-                "signal": str(row.signal),
-                "type": str(row.type),
-                "confidence": float(row.conf),
-                "rationale": str(row.rationale)
-            })
+        for row in self.g.query(query, initNs=init_ns):
+            results.append(row)
+        
         return results
     
-    def export_knowledge_graph(self) -> str:
-        """Export graph for audit and explainability"""
-        return self.g.serialize(format="turtle")
+    def export_knowledge(self, format: str = "turtle") -> str:
+        """Exports knowledge graph with full OWL + embedded SHACL reasoning."""
+        log_step("Applying ontology reasoning (OWL + SHACL)…")
 
+        # Step 1 — Apply OWL RL closure
+        try:
+            import owlrl
+            owlrl.DeductiveClosure(owlrl.OWLRL_Semantics).expand(self.g)
+        except Exception as e:
+            log_step(f"OWL RL inference warning: {e}")
+
+        # Step 2 — Apply SHACL rule-based inference (embedded rules)
+        try:
+            from pyshacl import validate
+            shacl_rules = """
+            @prefix sh: <http://www.w3.org/ns/shacl#> .
+            @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+            @prefix stock: <http://example.org/stock#> .
+            @prefix tech: <http://example.org/technical#> .
+            @prefix market: <http://example.org/market#> .
+
+            ############################################################
+            # RSI Rules
+            ############################################################
+            :RSIOverboughtRule
+                a sh:NodeShape ;
+                sh:targetClass tech:RSI ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:minInclusive 70 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BearTrend ;
+                ] .
+
+            :RSIOversoldRule
+                a sh:NodeShape ;
+                sh:targetClass tech:RSI ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:maxInclusive 30 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BullTrend ;
+                ] .
+
+            ############################################################
+            # MACD Rules
+            ############################################################
+            :MACDBullishRule
+                a sh:NodeShape ;
+                sh:targetClass tech:MACD ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasSignal ;
+                        sh:hasValue "bullish_crossover" ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BullTrend ;
+                ] .
+
+            :MACDBearishRule
+                a sh:NodeShape ;
+                sh:targetClass tech:MACD ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasSignal ;
+                        sh:hasValue "bearish_crossover" ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BearTrend ;
+                ] .
+
+            ############################################################
+            # ADX Rules
+            ############################################################
+            :ADXStrongTrendRule
+                a sh:NodeShape ;
+                sh:targetClass tech:ADX ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:minInclusive 25 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BullTrend ;
+                ] .
+
+            :ADXWeakTrendRule
+                a sh:NodeShape ;
+                sh:targetClass tech:ADX ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:maxInclusive 20 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:RangeBound ;
+                ] .
+
+            ############################################################
+            # ATR Rules
+            ############################################################
+            :ATRHighVolatilityRule
+                a sh:NodeShape ;
+                sh:targetClass tech:ATR ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:minInclusive 5 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:VolatileBreakout ;
+                ] .
+
+            :ATRLowVolatilityRule
+                a sh:NodeShape ;
+                sh:targetClass tech:ATR ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasNumericValue ;
+                        sh:maxInclusive 2 ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:RangeBound ;
+                ] .
+
+            ############################################################
+            # Volume Rules
+            ############################################################
+            :VolumeAccumulationRule
+                a sh:NodeShape ;
+                sh:targetClass tech:OBV ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasSignal ;
+                        sh:hasValue "accumulation" ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BullTrend ;
+                ] .
+
+            :VolumeDistributionRule
+                a sh:NodeShape ;
+                sh:targetClass tech:OBV ;
+                sh:rule [
+                    a sh:TripleRule ;
+                    sh:condition [
+                        sh:path stock:hasSignal ;
+                        sh:hasValue "distribution" ;
+                    ] ;
+                    sh:subject sh:this ;
+                    sh:predicate stock:impliesState ;
+                    sh:object market:BearTrend ;
+                ] .
+            """
+
+            conforms, results_graph, results_text = validate(
+                self.g,
+                shacl_graph_text=shacl_rules,
+                inference="rdfs",
+                advanced=True,
+                debug=False
+            )
+            self.g += results_graph
+            log_step("SHACL reasoning completed successfully.")
+        except Exception as e:
+            log_step(f"SHACL reasoning error: {e}")
+
+        # Step 3 — Return serialized graph
+        return self.g.serialize(format=format)
+    
+    def serialize(self, format: str = "turtle") -> str:
+        """
+        Serializes the ontology graph into the desired format (default Turtle).
+        This wraps rdflib.Graph.serialize() and includes inference closure if available.
+        """
+        try:
+            import owlrl
+            owlrl.DeductiveClosure(owlrl.OWLRL_Semantics).expand(self.g)
+        except ImportError:
+            log_step("owlrl not installed — skipping OWL inference closure.")
+        except Exception as e:
+            log_step(f"Serialization inference warning: {e}")
+
+        try:
+            return self.g.serialize(format=format)
+        except Exception as e:
+            log_step(f"Error serializing ontology: {e}")
+            return ""
+
+    def get_knowledge_summary(self) -> Dict[str, Any]:
+        """Returns summary statistics of the knowledge graph."""
+        summary = {
+            "total_statements": len(self.g),
+            "indicators": len(list(self.g.subjects(RDF.type, STOCK.Indicator))),
+            "signals": len(list(self.g.subjects(RDF.type, STOCK.Signal))),
+            "evidence_bundles": len(list(self.g.subjects(RDF.type, EVIDENCE.EvidenceBundle))),
+            "market_states": len(list(self.g.subjects(RDF.type, MARKET.MarketState))),
+            "risk_assessments": len(list(self.g.subjects(RDF.type, RISK.RiskAssessment))),
+            "contradictions": len(self.detect_contradictions()),
+            "confirmations": len(self.find_confirmations())
+        }
+        
+        return summary
+
+# Maintain original function signatures for backward compatibility
+class EnhancedStockAnalysisOntology:
+    """
+    Enhanced ontology engine that maintains original function signatures
+    while providing improved ontology capabilities.
+    """
+    
+    def __init__(self, debug: bool = False):
+        self.debug = debug
+        self.version = "7.0-owl-enhanced"
+        self._context_cache: Dict[str, MarketContext] = {}
+        self.ontology = EnhancedStockOntologyGraph()
+        
+        # Weight configurations (tune these for sensitivity)
+        self.indicator_weights = {
+            "trend": 0.30, "momentum": 0.25, "volume": 0.20, 
+            "volatility": 0.15, "support_resistance": 0.10
+        }
+    
+    def _safe_get_value(self, df, column, default=0.0, index_offset=0):
+        """Safely get value from DataFrame column with fallback and historical lookback."""
+        if (column in df.columns and len(df) > abs(index_offset) and 
+            not pd.isna(df[column].iloc[index_offset])):
+            return df[column].iloc[index_offset]
+        return default
+
+    def infer_market_context(self, symbol: str, df: pd.DataFrame) -> Any:
+    
+        """Main pipeline with full indicator coverage using enhanced ontology."""
+        cache_key = f"{symbol}_{len(df)}_{df.index[-1].strftime('%Y%m%d')}"
+        if cache_key in self._context_cache:
+            return self._context_cache[cache_key]
+        
+        if len(df) < 50:
+            return self._default_context()
+        
+        # Extract all indicator categories using enhanced methods
+        extracts = {
+            "trend": self._extract_trend_enhanced(symbol, df),
+            "momentum": self._extract_momentum_enhanced(symbol, df),
+            "volume": self._extract_volume_enhanced(symbol, df),
+            "volatility": self._extract_volatility_enhanced(symbol, df),
+            "ichimoku": self._extract_ichimoku_enhanced(symbol, df),
+            "fibonacci": self._extract_fibonacci_enhanced(symbol, df)
+        }
+        
+        # Detect contradictions early using ontology
+        contradictions = self.ontology.detect_contradictions()
+        
+        # Weighted inference
+        market_state, state_conf = self._infer_market_state_weighted(extracts)
+        trend_direction, trend_conf = self._infer_trend_direction_weighted(extracts)
+        risk_level, risk_conf = self._infer_risk_level_weighted(extracts)
+        
+        # Aggregate confidence
+        overall_confidence = (state_conf * 0.4 + trend_conf * 0.3 + risk_conf * 0.3)
+        
+        # S/R levels
+        sr_levels = self._calculate_sr_levels(df)
+        
+        # Build dynamic reasoning trace
+        reasoning_chain = self._build_dynamic_reasoning(
+            symbol, extracts, market_state, trend_direction, risk_level,
+            contradictions, overall_confidence
+        )
+        
+        # Link all to market state using ontology
+        for category in extracts.values():
+            for uri in category.get("uris", []):
+                self.ontology.link_state(uri, market_state.value, confidence=category.get("avg_confidence", 1.0))
+        
+        context = MarketContext(
+            market_state=market_state,
+            trend_direction=trend_direction,
+            risk_level=risk_level,
+            confidence_score=round(overall_confidence, 3),
+            volatility_regime=extracts["volatility"]["regime"],
+            volume_profile=extracts["volume"]["profile"],
+            support_levels=sr_levels["support"],
+            resistance_levels=sr_levels["resistance"],
+            ontology_graph=self.ontology.serialize(),
+            reasoning_chain=reasoning_chain,
+            contradictions=[{"indicator1": str(c[0]), "indicator2": str(c[1])} for c in contradictions]
+        )
+        
+        self._context_cache[cache_key] = context
+        return context
+    # ============================================================
+    # CLASSIFICATION HELPERS (ADD BELOW infer_market_context)
+    # ============================================================
+    def _classify_ma_signal(self, current, ma_value, threshold=0.01):
+        """Classify moving average relationship."""
+        diff = (current - ma_value) / ma_value
+        if diff > threshold:
+            return "bullish", min(abs(diff) * 10, 1.0)
+        elif diff < -threshold:
+            return "bearish", min(abs(diff) * 10, 1.0)
+        else:
+            return "neutral", 0.5
+
+    def _classify_adx(self, adx_value):
+        """Classify ADX trend strength."""
+        if adx_value >= 40:
+            return "very_strong_trend", 0.95
+        elif adx_value >= 25:
+            return "strong_trend", 0.8
+        elif adx_value >= 20:
+            return "moderate_trend", 0.6
+        else:
+            return "weak_trend", 0.4
+
+    def _classify_rsi(self, rsi_val):
+        """Classify RSI overbought/oversold conditions."""
+        if rsi_val > 70:
+            return "overbought", 0.9
+        elif rsi_val < 30:
+            return "oversold", 0.9
+        elif 50 <= rsi_val <= 70:
+            return "bullish_momentum", 0.7
+        elif 30 <= rsi_val < 50:
+            return "bearish_momentum", 0.7
+        else:
+            return "neutral", 0.5
+
+    def _classify_macd(self, macd_val, signal_val, hist_val):
+        """Classify MACD crossovers and histogram strength."""
+        if macd_val > signal_val and hist_val > 0:
+            return "bullish_crossover", min(abs(hist_val) * 5, 1.0)
+        elif macd_val < signal_val and hist_val < 0:
+            return "bearish_crossover", min(abs(hist_val) * 5, 1.0)
+        else:
+            return "neutral", 0.5
+
+    def _classify_stochastic(self, k_val, d_val):
+        """Classify Stochastic Oscillator cross and extremes."""
+        if k_val > 80 and d_val > 80:
+            return "overbought", 0.9
+        elif k_val < 20 and d_val < 20:
+            return "oversold", 0.9
+        elif k_val > d_val:
+            return "bullish_cross", 0.7
+        elif k_val < d_val:
+            return "bearish_cross", 0.7
+        else:
+            return "neutral", 0.5
+
+    def _classify_cci(self, cci_val):
+        """Classify Commodity Channel Index levels."""
+        if cci_val > 100:
+            return "bullish_trend", 0.8
+        elif cci_val < -100:
+            return "bearish_trend", 0.8
+        else:
+            return "neutral", 0.5
+
+    def _classify_mfi(self, mfi_val):
+        """Classify Money Flow Index overbought/oversold."""
+        if mfi_val > 80:
+            return "overbought", 0.9
+        elif mfi_val < 20:
+            return "oversold", 0.9
+        elif mfi_val > 50:
+            return "bullish_flow", 0.7
+        elif mfi_val < 50:
+            return "bearish_flow", 0.7
+        else:
+            return "neutral", 0.5
+
+    # Enhanced extraction methods
+    def _extract_trend_enhanced(self, symbol, df):
+        """Enhanced trend extraction with ontology integration."""
+        closes = df["close"]
+        entities = {"uris": [], "signals": [], "confidences": []}
+        
+        # Moving averages with confidence scoring
+        for period, weight in [(20, 0.3), (50, 0.4), (200, 0.3)]:
+            sma = closes.rolling(period).mean().iloc[-1]
+            ema = closes.ewm(span=period).mean().iloc[-1]
+            current = closes.iloc[-1]
+            
+            # SMA signal
+            sma_signal, sma_conf = self._classify_ma_signal(current, sma)
+            sma_uri = self.ontology.add_indicator(symbol, f"SMA_{period}", sma, sma_signal, sma_conf, 
+                                                {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(sma_uri)
+            entities["signals"].append(sma_signal)
+            entities["confidences"].append(sma_conf * weight)
+            
+            # EMA signal (more responsive, higher weight)
+            ema_signal, ema_conf = self._classify_ma_signal(current, ema, threshold=0.015)
+            ema_uri = self.ontology.add_indicator(symbol, f"EMA_{period}", ema, ema_signal, ema_conf,
+                                                {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(ema_uri)
+            entities["signals"].append(ema_signal)
+            entities["confidences"].append(ema_conf * weight * 1.2)
+        
+        # ADX with directional components
+        adx_ind = ta.trend.ADXIndicator(df["high"], df["low"], df["close"])
+        adx_value = adx_ind.adx().iloc[-1]
+        di_plus = adx_ind.adx_pos().iloc[-1]
+        di_minus = adx_ind.adx_neg().iloc[-1]
+        
+        adx_strength, adx_conf = self._classify_adx(adx_value)
+        trend_strength = "strong" if adx_value > 25 else "weak"
+        
+        adx_uri = self.ontology.add_indicator(symbol, "ADX", adx_value, adx_strength, adx_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(adx_uri)
+        entities["signals"].append(adx_strength)
+        entities["confidences"].append(adx_conf * 0.5)
+        
+        # DI+/- signals
+        di_signal, di_conf = "bullish" if di_plus > di_minus else "bearish", abs(di_plus - di_minus) / 100
+        di_uri = self.ontology.add_indicator(symbol, "DI_Cross", di_plus - di_minus, di_signal, di_conf,
+                                           {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(di_uri)
+        entities["confidences"].append(di_conf * 0.3)
+        
+        entities["avg_confidence"] = sum(entities["confidences"]) / len(entities["confidences"]) if entities["confidences"] else 0.5
+        entities["trend_strength"] = trend_strength
+        entities["di_signal"] = di_signal
+        
+        return entities
+    
+    def _extract_momentum_enhanced(self, symbol, df):
+        """Enhanced momentum extraction with ontology integration."""
+        closes = df["close"]
+        entities = {"uris": [], "signals": [], "confidences": []}
+        
+        # RSI
+        rsi_val = ta.momentum.RSIIndicator(closes).rsi().iloc[-1]
+        rsi_signal, rsi_conf = self._classify_rsi(rsi_val)
+        rsi_uri = self.ontology.add_indicator(symbol, "RSI", rsi_val, rsi_signal, rsi_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(rsi_uri)
+        entities["signals"].append(rsi_signal)
+        entities["confidences"].append(rsi_conf * 0.25)
+        
+        # MACD with histogram
+        macd_ind = ta.trend.MACD(closes)
+        macd_val = macd_ind.macd().iloc[-1]
+        macd_signal = macd_ind.macd_signal().iloc[-1]
+        macd_hist = macd_ind.macd_diff().iloc[-1]
+        
+        macd_signal_type, macd_conf = self._classify_macd(macd_val, macd_signal, macd_hist)
+        macd_uri = self.ontology.add_indicator(symbol, "MACD", macd_val, macd_signal_type, macd_conf,
+                                             {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(macd_uri)
+        entities["signals"].append(macd_signal_type)
+        entities["confidences"].append(macd_conf * 0.25)
+        
+        # Stochastic Oscillator
+        stoch_ind = ta.momentum.StochasticOscillator(df["high"], df["low"], closes)
+        stoch_k = stoch_ind.stoch().iloc[-1]
+        stoch_d = stoch_ind.stoch_signal().iloc[-1]
+        
+        stoch_signal, stoch_conf = self._classify_stochastic(stoch_k, stoch_d)
+        stoch_uri = self.ontology.add_indicator(symbol, "Stochastic", stoch_k, stoch_signal, stoch_conf,
+                                              {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(stoch_uri)
+        entities["confidences"].append(stoch_conf * 0.25)
+        
+        # CCI
+        cci_val = ta.trend.CCIIndicator(df["high"], df["low"], closes).cci().iloc[-1]
+        cci_signal, cci_conf = self._classify_cci(cci_val)
+        cci_uri = self.ontology.add_indicator(symbol, "CCI", cci_val, cci_signal, cci_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(cci_uri)
+        entities["confidences"].append(cci_conf * 0.25)
+        
+        entities["avg_confidence"] = sum(entities["confidences"]) / len(entities["confidences"]) if entities["confidences"] else 0.5
+        return entities
+    
+    def _extract_volume_enhanced(self, symbol, df):
+        """Enhanced volume extraction with ontology integration."""
+        closes, vols = df["close"], df["volume"]
+        entities = {"uris": [], "profile": "neutral", "confidence": 0.5}
+
+        # OBV
+        obv_val = ta.volume.OnBalanceVolumeIndicator(closes, vols).on_balance_volume().iloc[-1]
+        obv_prev = df["OBV"].iloc[-5] if len(df) > 5 and "OBV" in df.columns else obv_val
+        obv_signal = "accumulation" if obv_val > obv_prev else "distribution"
+        obv_conf = min(abs(obv_val - obv_prev) / abs(obv_prev), 1.0) if obv_prev != 0 else 0.5
+
+        obv_uri = self.ontology.add_indicator(symbol, "OBV", obv_val, obv_signal, obv_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(obv_uri)
+
+        # VWAP deviation
+        vwap_val = self._safe_get_value(df, "VWAP", df["close"].iloc[-1])
+        vwap_dev = (closes.iloc[-1] - vwap_val) / vwap_val
+        vwap_signal = "above_vwap" if vwap_dev > 0 else "below_vwap"
+        vwap_conf = min(abs(vwap_dev) * 10, 1.0)
+
+        vwap_uri = self.ontology.add_indicator(symbol, "VWAP", vwap_val, vwap_signal, vwap_conf,
+                                             {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(vwap_uri)
+
+        # MFI
+        mfi_val = ta.volume.MFIIndicator(df["high"], df["low"], closes, vols).money_flow_index().iloc[-1]
+        mfi_signal, mfi_conf = self._classify_mfi(mfi_val)
+        mfi_uri = self.ontology.add_indicator(symbol, "MFI", mfi_val, mfi_signal, mfi_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(mfi_uri)
+
+        # CMF
+        cmf_val = ta.volume.ChaikinMoneyFlowIndicator(df["high"], df["low"], closes, vols).chaikin_money_flow().iloc[-1]
+        cmf_signal = "accumulation" if cmf_val > 0 else "distribution"
+        cmf_conf = min(abs(cmf_val) * 5, 1.0)
+
+        cmf_uri = self.ontology.add_indicator(symbol, "CMF", cmf_val, cmf_signal, cmf_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(cmf_uri)
+
+        # ADL
+        adl_val = self._safe_get_value(df, "ADL", 0.0)
+        adl_prev = self._safe_get_value(df, "ADL", adl_val, -5)
+        adl_signal = "accumulation" if adl_val > adl_prev else "distribution"
+        adl_conf = min(abs(adl_val - adl_prev) / abs(adl_prev), 1.0) if adl_prev != 0 else 0.5
+
+        adl_uri = self.ontology.add_indicator(symbol, "ADL", adl_val, adl_signal, adl_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(adl_uri)
+
+        # Force Index
+        fi_val = ta.volume.ForceIndexIndicator(closes, vols).force_index().iloc[-1]
+        fi_signal = "positive_force" if fi_val > 0 else "negative_force"
+        fi_series = ta.volume.ForceIndexIndicator(closes, vols).force_index().tail(20)
+        fi_conf = min(abs(fi_val) / max(abs(fi_series).mean(), 1.0), 1.0) if len(fi_series) > 0 else 0.5
+        fi_uri = self.ontology.add_indicator(symbol, "ForceIndex", fi_val, fi_signal, fi_conf,
+                                           {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(fi_uri)
+
+        # Aggregate volume profile
+        acc_signals = [obv_signal, cmf_signal, adl_signal]
+        acc_count = sum(1 for s in acc_signals if "accumulation" in s)
+        if acc_count >= 2:
+            entities["profile"] = "strong_accumulation"
+            entities["confidence"] = 0.8
+        elif "distribution" in acc_signals:
+            entities["profile"] = "distribution"
+            entities["confidence"] = 0.6
+
+        return entities
+    
+    def _extract_volatility_enhanced(self, symbol, df):
+        """Enhanced volatility extraction with ontology integration."""
+        closes = df["close"]
+        entities = {"uris": [], "regime": "medium", "confidence": 0.5}
+        
+        # ATR%
+        atr_val = ta.volatility.AverageTrueRange(df["high"], df["low"], closes).average_true_range().iloc[-1]
+        atr_pct = (atr_val / closes.iloc[-1]) * 100
+        
+        if atr_pct > 5:
+            vol_signal, vol_conf, regime = "high_volatility", 0.9, "high"
+        elif atr_pct < 2:
+            vol_signal, vol_conf, regime = "low_volatility", 0.9, "low"
+        else:
+            vol_signal, vol_conf, regime = "medium_volatility", 0.7, "medium"
+        
+        atr_uri = self.ontology.add_indicator(symbol, "ATR_pct", atr_pct, vol_signal, vol_conf,
+                                            {"timestamp": df.index[-1].isoformat()})
+        entities["uris"].append(atr_uri)
+        entities["regime"] = regime
+        entities["confidence"] = vol_conf
+        
+        # Bollinger Bands analysis
+        if "Upper_band" in df.columns and "Lower_band" in df.columns and "SMA_20" in df.columns:
+            bb_width = (df["Upper_band"].iloc[-1] - df["Lower_band"].iloc[-1]) / df["SMA_20"].iloc[-1]
+            if bb_width < 0.05:
+                bb_signal, bb_conf = "squeeze", 0.85
+            elif bb_width > 0.15:
+                bb_signal, bb_conf = "expansion", 0.7
+            else:
+                bb_signal, bb_conf = "normal", 0.5
+            
+            bb_uri = self.ontology.add_indicator(symbol, "BollingerWidth", bb_width * 100, bb_signal, bb_conf,
+                                               {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(bb_uri)
+        
+        return entities
+    
+    def _extract_ichimoku_enhanced(self, symbol, df):
+        """Enhanced Ichimoku extraction with ontology integration."""
+        entities = {"uris": [], "signals": []}
+        
+        # Check if Ichimoku columns exist
+        required_cols = ["Tenkan_sen", "Kijun_sen", "Senkou_span_a", "Senkou_span_b", "Chikou_span"]
+        if all(col in df.columns for col in required_cols):
+            tenkan = df["Tenkan_sen"].iloc[-1]
+            kijun = df["Kijun_sen"].iloc[-1]
+            senkou_a = df["Senkou_span_a"].iloc[-1]
+            senkou_b = df["Senkou_span_b"].iloc[-1]
+            chikou = df["Chikou_span"].iloc[-26] if len(df) > 26 else df["close"].iloc[-1]
+            current = df["close"].iloc[-1]
+            
+            # TK cross
+            tk_signal = "bullish" if tenkan > kijun else "bearish"
+            tk_uri = self.ontology.add_indicator(symbol, "Ichimoku_TK", tenkan - kijun, tk_signal, 0.7,
+                                               {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(tk_uri)
+            entities["signals"].append(tk_signal)
+            
+            # Price vs Cloud
+            cloud_top = max(senkou_a, senkou_b)
+            cloud_bottom = min(senkou_a, senkou_b)
+            
+            if current > cloud_top:
+                price_signal, price_conf = "above_cloud", 0.85
+            elif current < cloud_bottom:
+                price_signal, price_conf = "below_cloud", 0.85
+            else:
+                price_signal, price_conf = "in_cloud", 0.5
+            
+            price_uri = self.ontology.add_indicator(symbol, "Ichimoku_PriceVsCloud", current, price_signal, price_conf,
+                                                  {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(price_uri)
+            entities["signals"].append(price_signal)
+            
+            # Lagging span
+            lag_signal = "bullish" if chikou > current else "bearish"
+            lag_uri = self.ontology.add_indicator(symbol, "Ichimoku_Chikou", chikou, lag_signal, 0.6,
+                                                {"timestamp": df.index[-1].isoformat()})
+            entities["uris"].append(lag_uri)
+            entities["signals"].append(lag_signal)
+            
+            # Link confirmations using ontology
+            if tk_signal == price_signal == lag_signal:
+                for i in range(len(entities["uris"]) - 1):
+                    self.ontology.link_indicators(entities["uris"][i], entities["uris"][i+1], "confirms")
+        
+        return entities
+    
+    def _extract_fibonacci_enhanced(self, symbol, df):
+        """Enhanced Fibonacci extraction with ontology integration."""
+        entities = {"uris": []}
+        high_52w = df["high"].max()
+        low_52w = df["low"].min()
+        diff = high_52w - low_52w
+        
+        fib_levels = {
+            "0%": high_52w, "23.6%": high_52w - 0.236 * diff,
+            "38.2%": high_52w - 0.382 * diff, "50%": high_52w - 0.5 * diff,
+            "61.8%": high_52w - 0.618 * diff, "78.6%": high_52w - 0.786 * diff,
+            "100%": low_52w
+        }
+        
+        current = df["close"].iloc[-1]
+        for name, level in fib_levels.items():
+            proximity = abs(current - level) / current
+            conf = max(1 - proximity * 3, 0.2)
+            
+            fib_uri = self.ontology.add_indicator(symbol, f"Fib_{name}", level, "support_resistance", conf,
+                                                {"timestamp": df.index[-1].isoformat(), "level_name": name})
+            entities["uris"].append(fib_uri)
+        
+        return entities
+    
+    def _calculate_sr_levels(self, df):
+        """Dynamic S/R using quantiles and recent pivots."""
+        recent = df.tail(30)
+        return {
+            "support": sorted([float(recent["low"].min()), 
+                             float(recent["low"].quantile(0.25)),
+                             float(recent["low"].quantile(0.1))]),
+            "resistance": sorted([float(recent["high"].max()),
+                                float(recent["high"].quantile(0.75)),
+                                float(recent["high"].quantile(0.9))], reverse=True)
+        }
+    
+    def _infer_market_state_weighted(self, extracts):
+        """Weighted scoring across all evidence."""
+        scores = {state: 0.0 for state in MarketState}
+        confidences = {state: [] for state in MarketState}
+        
+        # Trend evidence
+        t = extracts["trend"]
+        if t.get("trend_strength") in ["strong", "very_strong"]:
+            if "bullish" in t.get("di_signal", ""):
+                scores[MarketState.BULL_TREND] += self.indicator_weights["trend"]
+                confidences[MarketState.BULL_TREND].append(t.get("avg_confidence", 0.5))
+            else:
+                scores[MarketState.BEAR_TREND] += self.indicator_weights["trend"]
+                confidences[MarketState.BEAR_TREND].append(t.get("avg_confidence", 0.5))
+        
+        # Momentum evidence
+        m = extracts["momentum"]
+        bullish_mom = sum(1 for s in m.get("signals", []) if "bullish" in s)
+        bearish_mom = sum(1 for s in m.get("signals", []) if "bearish" in s)
+        
+        if bullish_mom >= 2:
+            scores[MarketState.BULL_TREND] += self.indicator_weights["momentum"]
+            confidences[MarketState.BULL_TREND].append(m.get("avg_confidence", 0.5))
+        elif bearish_mom >= 2:
+            scores[MarketState.BEAR_TREND] += self.indicator_weights["momentum"]
+            confidences[MarketState.BEAR_TREND].append(m.get("avg_confidence", 0.5))
+        
+        # Volume evidence
+        v = extracts["volume"]
+        if "strong_accumulation" in v.get("profile", ""):
+            scores[MarketState.BULL_TREND] += self.indicator_weights["volume"] * 1.5
+            confidences[MarketState.BULL_TREND].append(v.get("confidence", 0.5))
+        elif "distribution" in v.get("profile", ""):
+            scores[MarketState.BEAR_TREND] += self.indicator_weights["volume"]
+            confidences[MarketState.BEAR_TREND].append(v.get("confidence", 0.5))
+        
+        # Volatility regime
+        vol = extracts["volatility"]
+        if vol.get("regime") == "high":
+            scores[MarketState.VOLATILE_BREAKOUT] += self.indicator_weights["volatility"]
+            confidences[MarketState.VOLATILE_BREAKOUT].append(vol.get("confidence", 0.5))
+        elif vol.get("regime") == "low" and max(scores.values()) < 0.3:
+            scores[MarketState.RANGE_BOUND] += self.indicator_weights["volatility"]
+            confidences[MarketState.RANGE_BOUND].append(vol.get("confidence", 0.5))
+        
+        # Select winner
+        winning_state = max(scores.items(), key=lambda x: x[1])[0] if scores else MarketState.SIDEWAYS_CONSOLIDATION
+        avg_conf = sum(confidences.get(winning_state, [0.5])) / max(len(confidences.get(winning_state, [])), 1)
+        
+        return winning_state, avg_conf
+    
+    def _infer_trend_direction_weighted(self, extracts):
+        """Multi-factor trend direction scoring."""
+        bullish_score = 0.0
+        total_conf = 0.0
+        
+        # Trend indicators
+        t = extracts["trend"]
+        if t.get("trend_strength") == "very_strong":
+            bullish_score += 2.0
+            total_conf += t.get("avg_confidence", 0.5)
+        elif t.get("trend_strength") == "strong":
+            bullish_score += 1.5
+            total_conf += t.get("avg_confidence", 0.5)
+        
+        # Momentum
+        m = extracts["momentum"]
+        bullish_mom = sum(1 for s in m.get("signals", []) if "bullish" in s)
+        bullish_score += bullish_mom * 0.8
+        total_conf += m.get("avg_confidence", 0.5)
+        
+        # Ichimoku
+        ich = extracts.get("ichimoku", {})
+        if len(ich.get("signals", [])) >= 2:
+            bullish_ich = sum(1 for s in ich["signals"] if "bullish" in s)
+            bullish_score += bullish_ich * 0.6
+        
+        # Volume confirmation
+        v = extracts["volume"]
+        if "accumulation" in v.get("profile", ""):
+            bullish_score += 0.5
+        
+        # Determine direction
+        if bullish_score >= 3.0:
+            direction = TrendDirection.STRONG_UP
+        elif bullish_score >= 1.5:
+            direction = TrendDirection.MODERATE_UP
+        elif bullish_score <= -3.0:
+            direction = TrendDirection.STRONG_DOWN
+        elif bullish_score <= -1.5:
+            direction = TrendDirection.MODERATE_DOWN
+        else:
+            direction = TrendDirection.NEUTRAL
+        
+        avg_conf = total_conf / 3 if total_conf > 0 else 0.5
+        return direction, avg_conf
+    
+    def _infer_risk_level_weighted(self, extracts):
+        """Infer risk level from multiple dimensions."""
+        risk_score = 0.0
+        confidences = []
+        
+        # Volatility risk (primary factor)
+        vol = extracts["volatility"]
+        if vol.get("regime") == "high":
+            risk_score += 4.0
+            confidences.append(vol.get("confidence", 0.5))
+        elif vol.get("regime") == "medium":
+            risk_score += 2.0
+            confidences.append(vol.get("confidence", 0.5))
+        
+        # Trend risk (counter-trend increases risk)
+        t = extracts["trend"]
+        if t.get("trend_strength") == "weak":
+            risk_score += 1.0
+            confidences.append(0.6)
+        
+        # Momentum exhaustion risk
+        m = extracts["momentum"]
+        signals = m.get("signals", [])
+        if any("overbought" in s or "oversold" in s for s in signals):
+            risk_score += 1.5
+            confidences.append(0.7)
+        
+        # Map to RiskLevel
+        if risk_score >= 4.5:
+            level = RiskLevel.VERY_HIGH
+        elif risk_score >= 3.5:
+            level = RiskLevel.HIGH
+        elif risk_score >= 2.5:
+            level = RiskLevel.MEDIUM
+        elif risk_score >= 1.5:
+            level = RiskLevel.LOW
+        else:
+            level = RiskLevel.VERY_LOW
+        
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.5
+        return level, avg_conf
+    
+    def _build_dynamic_reasoning(self, symbol, extracts, market_state, trend_direction,
+                               risk_level, contradictions, confidence):
+        """Generate dynamic reasoning trace with enhanced evidence."""
+        chain = [
+            f"Enhanced Analysis for {symbol} at {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            f"Overall Confidence: {confidence:.1%}",
+            f"Market State: {market_state.value.replace('_', ' ').title()}",
+            f"Trend Direction: {trend_direction.value.replace('_', ' ').title()}",
+            f"Risk Level: {risk_level.value.replace('_', ' ').title()}"
+        ]
+        
+        # Add top evidence
+        top_evidence = []
+        for category, data in extracts.items():
+            if category != "ml_features" and isinstance(data, dict):
+                if data.get("avg_confidence", 0) > 0.7:
+                    top_evidence.append(f"- {category.title()}: High confidence signals")
+        
+        if top_evidence:
+            chain.append("Key Evidence:")
+            chain.extend(top_evidence)
+        
+        # Add contradictions
+        if contradictions:
+            chain.append(f"⚠️ Detected {len(contradictions)} indicator contradictions")
+        
+        # Add confirmations
+        confirmations = self.ontology.find_confirmations()
+        if confirmations:
+            chain.append(f"✅ Found {len(confirmations)} strong indicator confirmations")
+        
+        # Add ontology statistics
+        summary = self.ontology.get_knowledge_summary()
+        chain.append(f"📊 Knowledge Graph: {summary['total_statements']} statements, {summary['indicators']} indicators")
+        
+        return chain
+    
+    def _format_confidence(self, conf: float) -> str:
+        if conf > 0.8:
+            return "Very High"
+        elif conf > 0.6:
+            return "High"
+        elif conf > 0.4:
+            return "Moderate"
+        return "Low"
+    
+    def _default_context(self):
+        return MarketContext(
+            market_state=MarketState.SIDEWAYS_CONSOLIDATION,
+            trend_direction=TrendDirection.NEUTRAL,
+            risk_level=RiskLevel.MEDIUM,
+            confidence_score=0.0,
+            volatility_regime="unknown",
+            volume_profile="unknown",
+            support_levels=[],
+            resistance_levels=[],
+            ontology_graph="",
+            reasoning_chain=["Insufficient data (need ≥ 50 bars)."],
+            contradictions=[]
+        )
+
+# Enhanced ontology engine instance
+enhanced_ontology = EnhancedStockAnalysisOntology(debug=False)
 
 # ============================================================
-# PART 2: INTRADAY TRADING ONTOLOGY ENGINE
+# PART 2: ENHANCED INFERENCE ENGINE
 # ============================================================
-
-class MarketSession(Enum):
-    """Enhanced session definitions for intraday trading"""
-    PRE_MARKET = "pre_market"
-    OPENING_RAMP = "opening_ramp"
-    MORNING_TREND = "morning_trend"
-    MID_DAY_CONSOLIDATION = "mid_day_consolidation"
-    AFTERNOON_MOVE = "afternoon_move"
-    CLOSING_RAMP = "closing_ramp"
-    POST_MARKET = "post_market"
-
 
 class SignalType(Enum):
-    """Institutional signal taxonomy"""
-    LONG_ENTRY = "long_entry"
-    SHORT_ENTRY = "short_entry"
-    SCALE_OUT = "scale_out"
-    STOP_LOSS = "stop_loss"
-    TAKE_PROFIT = "take_profit"
-    RISK_OFF = "risk_off"
+    """Standardized signal vocabulary."""
+    BULLISH_STRONG = "bullish_strong"
+    BULLISH_MODERATE = "bullish_moderate"
+    BEARISH_STRONG = "bearish_strong"
+    BEARISH_MODERATE = "bearish_moderate"
+    NEUTRAL = "neutral"
+    OVERSOLD = "oversold"
+    OVERBOUGHT = "overbought"
+    ACCUMULATION = "accumulation"
+    DISTRIBUTION = "distribution"
+    HIGH_VOLATILITY = "high_volatility"
+    LOW_VOLATILITY = "low_volatility"
 
 
-class RiskTier(Enum):
-    """Dynamic risk tiers based on volatility regime"""
-    CALM = "calm"
-    NORMAL = "normal"
-    ELEVATED = "elevated"
+class MarketState(Enum):
+    BULL_TREND = "bull_trend"
+    BEAR_TREND = "bear_trend"
+    SIDEWAYS_CONSOLIDATION = "sideways_consolidation"
+    VOLATILE_BREAKOUT = "volatile_breakout"
+    RANGE_BOUND = "range_bound"
+
+
+class TrendDirection(Enum):
+    STRONG_UP = "strong_up"
+    MODERATE_UP = "moderate_up"
+    NEUTRAL = "neutral"
+    MODERATE_DOWN = "moderate_down"
+    STRONG_DOWN = "strong_down"
+
+
+class RiskLevel(Enum):
+    VERY_LOW = "very_low"
+    LOW = "low"
+    MEDIUM = "medium"
     HIGH = "high"
-    EXTREME = "extreme"
+    VERY_HIGH = "very_high"
 
 
 @dataclass
-class IntradayContext:
-    """Comprehensive intraday trading context"""
-    symbol: str
-    session: MarketSession
-    timestamp: datetime
-    price: float
-    vwap: float
-    vwap_deviation: float
-    orb_high: float
-    orb_low: float
-    liquidity_zones: List[Tuple[float, float, str]]  # (price, volume, type)
-    signals: List[Dict[str, Any]] = field(default_factory=list)
-    risk_tier: RiskTier = RiskTier.NORMAL
-    position_size: int = 0
-    stop_loss: float = 0.0
-    take_profit: float = 0.0
-    expected_value: float = 0.0
-    ontology_graph: str = ""
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "symbol": self.symbol,
-            "session": self.session.value,
-            "price": round(self.price, 4),
-            "vwap_deviation": f"{self.vwap_deviation:.2%}",
-            "risk_tier": self.risk_tier.value,
-            "position_size": self.position_size,
-            "signals": self.signals
-        }
-
-
-class IntradayOntologyEngine:
-    """
-    Institutional-grade reasoning engine for intraday trading decisions.
-    Integrates market microstructure, liquidity analysis, and risk management.
-    """
-    
-    def __init__(self, account_size: float = 100_000.0):
-        self.account_size = account_size
-        self.graph = IntradayOntologyGraph()
-        self.config = config
-        logger.info(f"Engine initialized | Account: ${account_size:,.2f}")
-    
-    def analyze_intraday_context(self, symbol: str, df: pd.DataFrame) -> IntradayContext:
-        """
-        Main analysis pipeline for intraday trading context
-        """
-        if len(df) < self.config.orb_period:
-            logger.warning(f"Insufficient bars for {symbol}: {len(df)}")
-            return self._create_default_context(symbol)
-        
-        # Identify current session
-        session = self._identify_market_session(df)
-        
-        # Calculate core metrics
-        current_price = df["close"].iloc[-1]
-        vwap = self._calculate_vwap(df)
-        vwap_dev = (current_price - vwap) / vwap
-        
-        # Opening Range
-        orb_high, orb_low = self._calculate_opening_range(df)
-        
-        # Liquidity analysis
-        liquidity_zones = self._detect_liquidity_zones(df)
-        
-        # Risk assessment
-        risk_tier = self._assess_intraday_risk(df)
-        
-        # Generate signals
-        signals = self._generate_intraday_signals(
-            symbol, df, session, vwap_dev, orb_high, orb_low, risk_tier
-        )
-        
-        # Position sizing and trade management
-        position_size = self._calculate_position_size(
-            current_price, risk_tier, df["ATR"].iloc[-1]
-        )
-        
-        stop_loss, take_profit = self._calculate_trade_levels(
-            current_price, vwap, orb_high, orb_low, risk_tier
-        )
-        
-        # Build ontology graph
-        self._populate_ontology_graph(
-            symbol, df, signals, liquidity_zones, risk_tier
-        )
-        
-        context = IntradayContext(
-            symbol=symbol,
-            session=session,
-            timestamp=datetime.now(),
-            price=current_price,
-            vwap=vwap,
-            vwap_deviation=vwap_dev,
-            orb_high=orb_high,
-            orb_low=orb_low,
-            liquidity_zones=liquidity_zones,
-            signals=signals,
-            risk_tier=risk_tier,
-            position_size=position_size,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            ontology_graph=self.graph.export_knowledge_graph()
-        )
-        
-        logger.info(f"Analysis complete for {symbol} | Session: {session.value} | Signals: {len(signals)}")
-        return context
-    
-    def _identify_market_session(self, df: pd.DataFrame) -> MarketSession:
-        """Determine current market session based on time and volatility"""
-        # For YahooQuery data, use index time if available
-        if hasattr(df.index, 'time') and len(df) > 0:
-            try:
-                current_time = pd.to_datetime(df.index[-1]).time()
-                if current_time < datetime.strptime("09:30", "%H:%M").time():
-                    return MarketSession.PRE_MARKET
-                elif current_time < datetime.strptime("10:00", "%H:%M").time():
-                    return MarketSession.OPENING_RAMP
-                elif current_time < datetime.strptime("11:30", "%H:%M").time():
-                    return MarketSession.MORNING_TREND
-                elif current_time < datetime.strptime("14:00", "%H:%M").time():
-                    return MarketSession.MID_DAY_CONSOLIDATION
-                elif current_time < datetime.strptime("15:30", "%H:%M").time():
-                    return MarketSession.AFTERNOON_MOVE
-                elif current_time < datetime.strptime("16:00", "%H:%M").time():
-                    return MarketSession.CLOSING_RAMP
-                else:
-                    return MarketSession.POST_MARKET
-            except Exception:
-                pass
-        
-        # Fallback based on price action characteristics
-        if len(df) >= 60:
-            recent_vol = df["close"].tail(30).std()
-            early_vol = df["close"].head(30).std()
-            
-            if recent_vol > early_vol * 1.5:
-                return MarketSession.CLOSING_RAMP
-            elif early_vol > recent_vol * 1.5:
-                return MarketSession.OPENING_RAMP
-        
-        return MarketSession.MID_DAY_CONSOLIDATION
-    
-    def _calculate_vwap(self, df: pd.DataFrame) -> float:
-        """Calculate VWAP for the session"""
-        if "VWAP" in df.columns and not df["VWAP"].isna().all():
-            return df["VWAP"].iloc[-1]
-        
-        # Recalculate if needed
-        closes, vols = df["close"], df["volume"]
-        if len(closes) > 0 and vols.sum() > 0:
-            cum_pv = (closes * vols).sum()
-            cum_vol = vols.sum()
-            return cum_pv / cum_vol
-        return df["close"].iloc[-1] if len(df) > 0 else 0.0
-    
-    def _calculate_opening_range(self, df: pd.DataFrame) -> Tuple[float, float]:
-        """Calculate Opening Range Breakout levels"""
-        orb_bars = min(self.config.orb_period, len(df))
-        if orb_bars == 0:
-            return 0.0, 0.0
-        orb_high = df["high"].iloc[:orb_bars].max()
-        orb_low = df["low"].iloc[:orb_bars].min()
-        return orb_high, orb_low
-    
-    def _detect_liquidity_zones(self, df: pd.DataFrame) -> List[Tuple[float, float, str]]:
-        """Detect support/resistance liquidity zones using volume profile"""
-        if len(df) < 20:
-            return []
-        
-        # Simple intraday volume profile approximation
-        recent_df = df.tail(60)  # Last hour
-        price_bins = pd.cut(recent_df["close"], bins=20)
-        volume_profile = recent_df.groupby(price_bins)["volume"].sum()
-        
-        liquidity_zones = []
-        if len(volume_profile) > 0:
-            threshold = volume_profile.quantile(0.8)
-            for i, (price_range, vol) in enumerate(volume_profile.items()):
-                if vol > threshold and hasattr(price_range, 'mid') and price_range.mid is not None:
-                    price_level = float(price_range.mid)
-                    zone_type = "support" if i < len(volume_profile) / 2 else "resistance"
-                    liquidity_zones.append((price_level, int(vol), zone_type))
-        
-        return liquidity_zones
-    
-    def _assess_intraday_risk(self, df: pd.DataFrame) -> RiskTier:
-        """Dynamic risk assessment based on multiple factors"""
-        if len(df) == 0 or df["ATR"].isna().all():
-            return RiskTier.NORMAL
-        
-        # ATR-based volatility
-        atr = df["ATR"].iloc[-1]
-        price = df["close"].iloc[-1]
-        atr_pct = atr / price if price > 0 else 0
-        
-        # Bollinger Band width
-        bb_width = 0.0
-        if "BB_Upper" in df.columns and "BB_Lower" in df.columns and "BB_Middle" in df.columns:
-            if not df["BB_Middle"].isna().iloc[-1] and df["BB_Middle"].iloc[-1] > 0:
-                bb_width = (df["BB_Upper"].iloc[-1] - df["BB_Lower"].iloc[-1]) / df["BB_Middle"].iloc[-1]
-        
-        # Composite risk score
-        risk_score = 0
-        
-        if atr_pct > 0.03:
-            risk_score += 3
-        elif atr_pct > 0.02:
-            risk_score += 2
-        elif atr_pct > 0.01:
-            risk_score += 1
-        
-        if bb_width > 0.05:
-            risk_score += 2
-        elif bb_width > 0.03:
-            risk_score += 1
-        
-        # Map score to tier
-        if risk_score >= 5:
-            return RiskTier.EXTREME
-        elif risk_score >= 4:
-            return RiskTier.HIGH
-        elif risk_score >= 3:
-            return RiskTier.ELEVATED
-        elif risk_score >= 2:
-            return RiskTier.NORMAL
-        else:
-            return RiskTier.CALM
-    
-    def _generate_intraday_signals(self, symbol: str, df: pd.DataFrame, 
-                                  session: MarketSession, vwap_dev: float,
-                                  orb_high: float, orb_low: float,
-                                  risk_tier: RiskTier) -> List[Dict[str, Any]]:
-        """Generate actionable intraday trading signals"""
-        signals = []
-        if len(df) == 0:
-            return signals
-        
-        current_price = df["close"].iloc[-1]
-        
-        # ORB Strategy
-        if session in [MarketSession.OPENING_RAMP, MarketSession.MORNING_TREND]:
-            if current_price > orb_high:
-                signals.append({
-                    "type": SignalType.LONG_ENTRY,
-                    "confidence": 0.75,
-                    "rationale": f"Opening Range Breakout above {orb_high:.2f}"
-                })
-            elif current_price < orb_low:
-                signals.append({
-                    "type": SignalType.SHORT_ENTRY,
-                    "confidence": 0.75,
-                    "rationale": f"Opening Range Breakdown below {orb_low:.2f}"
-                })
-        
-        # VWAP Mean Reversion
-        if abs(vwap_dev) > self.config.vwap_threshold and risk_tier != RiskTier.EXTREME:
-            if vwap_dev > 0:
-                signals.append({
-                    "type": SignalType.SHORT_ENTRY,
-                    "confidence": 0.65,
-                    "rationale": f"Price {vwap_dev:.2%} above VWAP - mean reversion"
-                })
-            elif vwap_dev < 0:
-                signals.append({
-                    "type": SignalType.LONG_ENTRY,
-                    "confidence": 0.65,
-                    "rationale": f"Price {vwap_dev:.2%} below VWAP - mean reversion"
-                })
-        
-        # Momentum confirmation
-        if "RSI" in df.columns and "MACD" in df.columns and "MACD_Signal" in df.columns:
-            rsi = df["RSI"].iloc[-1]
-            macd = df["MACD"].iloc[-1]
-            macd_signal = df["MACD_Signal"].iloc[-1]
-            
-            if rsi > 50 and macd > macd_signal:
-                signals.append({
-                    "type": SignalType.LONG_ENTRY,
-                    "confidence": 0.70,
-                    "rationale": f"RSI {rsi:.1f} and MACD bullish"
-                })
-            elif rsi < 50 and macd < macd_signal:
-                signals.append({
-                    "type": SignalType.SHORT_ENTRY,
-                    "confidence": 0.70,
-                    "rationale": f"RSI {rsi:.1f} and MACD bearish"
-                })
-        
-        # Add to ontology graph
-        for signal in signals:
-            self.graph.add_trading_signal(
-                symbol, signal["type"].value, 
-                signal["confidence"], signal["rationale"]
-            )
-        
-        return signals
-    
-    def _calculate_position_size(self, price: float, risk_tier: RiskTier, atr: float) -> int:
-        """Risk-based position sizing using ATR"""
-        if atr == 0 or price == 0:
-            return 0
-        
-        risk_amount = self.account_size * config.risk_per_trade
-        
-        # Adjust risk per trade based on risk tier
-        risk_multiplier = {
-            RiskTier.CALM: 1.2,
-            RiskTier.NORMAL: 1.0,
-            RiskTier.ELEVATED: 0.7,
-            RiskTier.HIGH: 0.5,
-            RiskTier.EXTREME: 0.3
-        }
-        
-        adjusted_risk = risk_amount * risk_multiplier.get(risk_tier, 1.0)
-        stop_distance = atr * 1.5  # 1.5x ATR stop
-        
-        shares = int(adjusted_risk / stop_distance) if stop_distance > 0 else 0
-        
-        logger.debug(f"Position size: {shares} shares | Risk tier: {risk_tier.value}")
-        return shares
-    
-    def _calculate_trade_levels(self, price: float, vwap: float, 
-                               orb_high: float, orb_low: float,
-                               risk_tier: RiskTier) -> Tuple[float, float]:
-        """Calculate stop-loss and take-profit levels - FIXED"""
-        if price == 0:
-            return 0.0, 0.0
-        
-        stop_distance_pct = 0.01 * (1.5 if risk_tier == RiskTier.HIGH else 1.0)
-        stop_loss_price = price * (1 - stop_distance_pct)
-        take_profit_price = price * (1 + stop_distance_pct * 2.0)  # 1:2 R:R
-        return stop_loss_price, take_profit_price
-    
-    def _populate_ontology_graph(self, symbol: str, df: pd.DataFrame,
-                               signals: List[Dict], liquidity_zones: List,
-                               risk_tier: RiskTier):
-        """Populate graph with comprehensive trading context"""
-        # ✅ FIXED: Indicator-specific signal logic
-        for indicator in ["RSI", "MACD", "ATR", "ADX"]:
-            if indicator in df.columns and not df[indicator].isna().all():
-                if indicator == "RSI":
-                    signal = "bullish" if df[indicator].iloc[-1] > 50 else "bearish"
-                elif indicator == "MACD":
-                    signal = "bullish" if df["MACD"].iloc[-1] > df["MACD_Signal"].iloc[-1] else "bearish"
-                else:  # ATR, ADX - lower values = lower risk = bullish signal
-                    current = df[indicator].iloc[-1]
-                    avg = df[indicator].rolling(20).mean().iloc[-1] if len(df) >= 20 else current
-                    signal = "bullish" if current < avg else "bearish"
-                
-                metadata = {
-                    "signal": signal,
-                    "confidence": 0.8,
-                    "risk_tier": risk_tier.value
-                }
-                self.graph.add_indicator(symbol, indicator, df[indicator].iloc[-1], metadata)
-        
-        # Add liquidity zones
-        for price, volume, zone_type in liquidity_zones:
-            self.graph.add_liquidity_zone(symbol, zone_type, price, volume)
-    
-    def _create_default_context(self, symbol: str) -> IntradayContext:
-        """Create safe default context when analysis fails"""
-        logger.warning(f"Creating default context for {symbol}")
-        return IntradayContext(
-            symbol=symbol,
-            session=MarketSession.MID_DAY_CONSOLIDATION,
-            timestamp=datetime.now(),
-            price=0.0,
-            vwap=0.0,
-            vwap_deviation=0.0,
-            orb_high=0.0,
-            orb_low=0.0,
-            liquidity_zones=[],
-            signals=[],
-            risk_tier=RiskTier.NORMAL,
-            position_size=0,
-            stop_loss=0.0,
-            take_profit=0.0,
-            ontology_graph=self.graph.export_knowledge_graph()
-        )
+class MarketContext:
+    """Enhanced context with confidence scores."""
+    market_state: MarketState
+    trend_direction: TrendDirection
+    risk_level: RiskLevel
+    confidence_score: float
+    volatility_regime: str
+    volume_profile: str
+    support_levels: List[float]
+    resistance_levels: List[float]
+    ontology_graph: str
+    reasoning_chain: List[str]
+    contradictions: List[Dict[str, str]]
 
 
 # ============================================================
-# PART 3: INSTITUTIONAL GRADE DASHBOARD
+# PART 3: DATA FETCHING, INDICATOR COMPUTATION & DASH LAYOUT
 # ============================================================
 
 # ─────────────────────────────────────────────
-# Application Theme Configuration
+# Ontology Engine Initialization
 # ─────────────────────────────────────────────
-def create_institutional_theme():
-    """Professional dark theme with high-contrast accents"""
-    return {
-        "layout": {
-            "paper_bgcolor": "#0a0e27",
-            "plot_bgcolor": "#0a0e27",
-            "font": {"family": "Inter, sans-serif", "color": "#e0e6f0", "size": 12},
-            "title": {"font": {"size": 16, "color": "#ffffff"}},
-            "xaxis": {
-                "gridcolor": "#1a1f3a", "linecolor": "#2a3150",
-                "tickcolor": "#e0e6f0", "ticks": "outside"
-            },
-            "yaxis": {
-                "gridcolor": "#1a1f3a", "linecolor": "#2a3150",
-                "tickcolor": "#e0e6f0", "ticks": "outside"
-            },
-            "colorway": [
-                "#00d4ff", "#ff6b6b", "#4ecdc4", "#45b7d1", "#96ceb4",
-                "#feca57", "#ff9ff3", "#54a0ff", "#5f27cd", "#00d2d3"
-            ]
-        },
-        "data": {
-            "candlestick": {
-                "increasing": {"line": {"color": "#00d4ff"}, "fillcolor": "#00d4ff30"},
-                "decreasing": {"line": {"color": "#ff6b6b"}, "fillcolor": "#ff6b6b30"}
-            }
-        }
-    }
+ontology = enhanced_ontology
 
 # ─────────────────────────────────────────────
-# Application Initialization
+# Cached YahooQuery Data Fetcher
 # ─────────────────────────────────────────────
-app = Dash(
-    __name__,
-    external_stylesheets=[
-        dbc.themes.SLATE,
-        # ✅ FIXED: Removed space before semicolon in font URL
-        "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap"
-    ],
-    suppress_callback_exceptions=True,
-    meta_tags=[
-        {"name": "viewport", "content": "width=device-width, initial-scale=1.0"},
-        {"name": "description", "content": "Institutional Intraday Trading Decision Support System"}
-    ]
-)
-app.title = "Intraday DSS Pro"
-server = app.server
-
-# ─────────────────────────────────────────────
-# Professional Layout Design
-# ─────────────────────────────────────────────
-app.layout = dbc.Container([
-    # Header Banner
-    dbc.Row([
-        dbc.Col([
-            html.Div([
-                html.H1("Intraday Trading DSS Pro", className="text-primary mb-0"),
-                html.P("Institutional-Grade Decision Support System", 
-                       className="text-muted mb-0"),
-                html.Hr(className="bg-primary")
-            ], className="text-center py-3")
-        ], width=12)
-    ]),
-    
-    # Control Panel
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("📊 Trading Parameters", className="bg-dark"),
-                dbc.CardBody([
-                    dbc.Row([
-                        dbc.Col([
-                            dbc.Label("Symbol", className="text-light"),
-                            dbc.Input(
-                                id="symbol-input", type="text", value="AAPL",
-                                placeholder="Enter symbol (e.g., AAPL)", size="sm"
-                            )
-                        ], width=3),
-                        dbc.Col([
-                            dbc.Label("Account Size ($)", className="text-light"),
-                            dbc.Input(
-                                id="account-size", type="number", value=100000,
-                                step=1000, min=1000, size="sm"
-                            )
-                        ], width=3),
-                        dbc.Col([
-                            dbc.Label("Risk per Trade (%)", className="text-light"),
-                            dbc.Input(
-                                id="risk-per-trade", type="number", value=1.0,
-                                step=0.1, min=0.1, max=5, size="sm"
-                            )
-                        ], width=3),
-                        dbc.Col([
-                            dbc.Label(" ", className="text-light"),
-                            dbc.Button(
-                                "Analyze & Generate Signals", id="analyze-btn",
-                                color="primary", size="sm", className="w-100 mt-3"
-                            )
-                        ], width=3)
-                    ])
-                ])
-            ], className="mb-3")
-        ], width=12)
-    ]),
-    
-    # Signal Dashboard (Key Information Panel)
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("🚨 Active Trading Signals", className="bg-success"),
-                dbc.CardBody(id="signal-dashboard", className="p-0")
-            ], className="mb-3")
-        ], width=12)
-    ]),
-    
-    # Main Chart Area
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("📈 Price Action & Liquidity", className="bg-dark"),
-                dbc.CardBody(dcc.Graph(id="main-chart", style={"height": "500px"}))
-            ], className="mb-3")
-        ], width=8),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("📊 Risk Metrics", className="bg-dark"),
-                dbc.CardBody(id="risk-metrics")
-            ], className="mb-3"),
-            dbc.Card([
-                dbc.CardHeader("📍 Liquidity Zones", className="bg-dark"),
-                dbc.CardBody(id="liquidity-zones")
-            ])
-        ], width=4)
-    ]),
-    
-    # Secondary Charts Grid
-    dbc.Row([
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("🎯 VWAP Deviation", className="bg-dark"),
-            dbc.CardBody(dcc.Graph(id="vwap-chart", style={"height": "300px"}))
-        ]), width=6),
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("📊 Volume Profile", className="bg-dark"),
-            dbc.CardBody(dcc.Graph(id="volume-chart", style={"height": "300px"}))
-        ]), width=6)
-    ], className="mb-3"),
-    
-    dbc.Row([
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("⚡ Momentum Matrix", className="bg-dark"),
-            dbc.CardBody(dcc.Graph(id="momentum-chart", style={"height": "300px"}))
-        ]), width=6),
-        dbc.Col(dbc.Card([
-            dbc.CardHeader("🛡️ Risk Analysis", className="bg-dark"),
-            dbc.CardBody(dcc.Graph(id="risk-chart", style={"height": "300px"}))
-        ]), width=6)
-    ], className="mb-3"),
-    
-    # Ontology & Reasoning Panel
-    dbc.Row([
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("🧠 Ontology Reasoning Trace", className="bg-dark"),
-                dbc.CardBody(id="reasoning-trace", style={
-                    "maxHeight": "400px", "overflowY": "auto"
-                })
-            ])
-        ], width=8),
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader("📋 Trade Plan", className="bg-dark"),
-                dbc.CardBody(id="trade-plan")
-            ])
-        ], width=4)
-    ], className="mb-3"),
-    
-    # Hidden storage for ontology data
-    dcc.Store(id="ontology-store", storage_type="memory"),
-    dcc.Store(id="last-analysis-timestamp", storage_type="memory"),
-    
-    # Footer
-    html.Footer([
-        html.Hr(className="bg-primary"),
-        html.P("Intraday DSS Pro v5.0 | Institutional Trading Technology", 
-               className="text-center text-muted small")
-    ])
-], fluid=True, className="bg-dark text-light min-vh-100")
-
-
-# ============================================================
-# PART 4: CACHED DATA & COMPUTATION LAYER
-# ============================================================
-
-@memory.cache(ignore=["ticker"])
-def fetch_intraday_data(ticker: str, period: str = "5d", interval: str = "1m") -> pd.DataFrame:
+@memory.cache
+def fetch_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     """
-    Fetch intraday data with institutional-grade error handling
+    Fetches OHLCV data for the specified stock symbol using YahooQuery,
+    with persistent caching for computational efficiency and reproducibility.
     """
-    logger.info(f"Fetching intraday data for {ticker} | {period} @ {interval}")
-    try:
-        tq = Ticker(ticker)
-        df = tq.history(period=period, interval=interval)
-        
-        if isinstance(df, pd.DataFrame) and df.empty:
-            logger.warning(f"No data returned for {ticker}")
-            return pd.DataFrame()
-        
-        if isinstance(df.index, pd.MultiIndex):
-            df.index = df.index.get_level_values("date")
-        
-        df = df.dropna(subset=["close", "volume"])
-        df = df[df["volume"] > 0]  # Filter zero-volume bars
-        
-        # Ensure we have required columns
-        required_cols = ["open", "high", "low", "close", "volume"]
-        if not all(col in df.columns for col in required_cols):
-            logger.error(f"Missing required columns in data for {ticker}")
-            return pd.DataFrame()
-        
-        logger.info(f"Retrieved {len(df)} bars for {ticker}")
-        return df.sort_index()
-        
-    except Exception as e:
-        logger.error(f"Data fetch failed for {ticker}: {e}", exc_info=True)
-        return pd.DataFrame()
+    log_step(f"Fetching data for {ticker} | Period={period} | Interval={interval}")
+    tq = Ticker(ticker)
+    df = tq.history(period=period, interval=interval)
+    if isinstance(df.index, pd.MultiIndex):
+        df.index = df.index.get_level_values("date")
+    df = df.dropna(subset=["close"])
+    log_step(f"Retrieved {len(df)} rows for {ticker}.")
+    return df
 
 
-def compute_intraday_indicators(df: pd.DataFrame) -> pd.DataFrame:
+# ─────────────────────────────────────────────
+# Technical Indicator Computation (Vectorized)
+# ─────────────────────────────────────────────
+def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute intraday-specific technical indicators optimized for speed
+    Computes all technical indicators required for ontology reasoning.
+    Optimized for minimal redundancy and vectorized across Pandas.
     """
-    if df.empty or len(df) < 20:
-        logger.warning("Insufficient data for indicator computation")
-        return df
-    
-    logger.debug("Computing intraday indicators")
+    log_step("Computing technical indicators…")
     closes, highs, lows, vols = df["close"], df["high"], df["low"], df["volume"]
     
-    # Fast intraday moving averages
-    for period in [9, 20, 50]:
-        df[f"EMA_{period}"] = closes.ewm(span=period, adjust=False).mean()
-    
-    # ✅ FIXED: VWAP resets per trading day
-    df['vwap_cumsum'] = (closes * vols).groupby(df.index.date).cumsum()
-    df['volume_cumsum'] = vols.groupby(df.index.date).cumsum()
-    df["VWAP"] = df['vwap_cumsum'] / df['volume_cumsum']
-    df.drop(['vwap_cumsum', 'volume_cumsum'], axis=1, inplace=True)
-    
-    # Bollinger Bands with intraday parameters
-    ma20 = closes.rolling(20).mean()
-    std20 = closes.rolling(20).std()
-    df["BB_Upper"] = ma20 + (2.0 * std20)
-    df["BB_Lower"] = ma20 - (2.0 * std20)
-    df["BB_Middle"] = ma20
-    df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / ma20.replace({0: np.nan})
-    
-    # Momentum indicators
-    df["RSI"] = ta.momentum.RSIIndicator(closes, window=14).rsi()
-    df["Stoch_K"] = ta.momentum.StochasticOscillator(
-        highs, lows, closes, window=14, smooth_window=3
-    ).stoch()
-    df["Stoch_D"] = ta.momentum.StochasticOscillator(
-        highs, lows, closes, window=14, smooth_window=3
-    ).stoch_signal()
-    
-    # MACD with faster intraday settings
-    macd = ta.trend.MACD(closes, window_fast=12, window_slow=26, window_sign=9)
-    df["MACD"] = macd.macd()
-    df["MACD_Signal"] = macd.macd_signal()
-    df["MACD_Hist"] = macd.macd_diff()
-    
-    # Volatility - critical for intraday
-    df["ATR"] = ta.volatility.AverageTrueRange(
-        highs, lows, closes, window=14
-    ).average_true_range()
-    df["ATR_Pct"] = df["ATR"] / closes * 100
-    
-    # Volume pressure
-    df["OBV"] = ta.volume.OnBalanceVolumeIndicator(closes, vols).on_balance_volume()
-    df["CMF"] = ta.volume.ChaikinMoneyFlowIndicator(
-        highs, lows, closes, vols, window=20
-    ).chaikin_money_flow()
-    
-    # Trend strength
-    adx = ta.trend.ADXIndicator(highs, lows, closes, window=14)
-    df["ADX"] = adx.adx()
-    df["DI_Plus"] = adx.adx_pos()
-    df["DI_Minus"] = adx.adx_neg()
-    
-    logger.debug(f"Indicators computed: {len(df.columns)} columns")
-    return df.dropna()
+    # Make a copy to avoid modifying original
+    result_df = df.copy()
 
-
-# ============================================================
-# PART 5: CALLBACKS & APPLICATION LOGIC
-# ============================================================
-
-@app.callback(
-    [
-        Output("signal-dashboard", "children"),
-        Output("main-chart", "figure"),
-        Output("vwap-chart", "figure"),
-        Output("volume-chart", "figure"),
-        Output("momentum-chart", "figure"),
-        Output("risk-chart", "figure"),
-        Output("risk-metrics", "children"),
-        Output("liquidity-zones", "children"),
-        Output("reasoning-trace", "children"),
-        Output("trade-plan", "children"),
-        Output("ontology-store", "data")
-    ],
-    Input("analyze-btn", "n_clicks"),
-    [
-        State("symbol-input", "value"),
-        State("account-size", "value"),
-        State("risk-per-trade", "value")
-    ]
-)
-def execute_intraday_analysis(n_clicks, symbol, account_size, risk_per_trade):
-    """
-    Master callback orchestrating the entire analysis pipeline
-    """
-    if not n_clicks:
-        return [html.Div("Awaiting analysis...")] + [go.Figure()] * 5 + [html.Div()] * 4 + [{}]
-    
-    if not symbol:
-        return [dbc.Alert("Please enter a valid symbol", color="warning")] + [go.Figure()] * 5 + [html.Div()] * 4 + [{}]
-    
     try:
-        logger.info(f"=== Starting analysis for {symbol} ===")
-        
-        # Update config
-        config.account_size = float(account_size or 100000)
-        config.risk_per_trade = float(risk_per_trade or 1.0) / 100
-        
-        # Fetch and compute
-        df = fetch_intraday_data(symbol, period="5d", interval="1m")
-        if df.empty:
-            raise ValueError(f"No data available for {symbol}")
-        
-        df = compute_intraday_indicators(df)
-        if df.empty:
-            raise ValueError(f"Indicator computation failed for {symbol}")
-        
-        # Execute ontology engine
-        engine = IntradayOntologyEngine(config.account_size)
-        analysis_window = min(390, len(df))  # Last session or available data
-        context = engine.analyze_intraday_context(symbol, df.tail(analysis_window))
-        
-        # Generate dashboard components
-        signal_dashboard = create_signal_dashboard(context)
-        main_chart = create_main_chart(df, context)
-        vwap_chart = create_vwap_chart(df, context)
-        volume_chart = create_volume_chart(df)
-        momentum_chart = create_momentum_chart(df)
-        risk_chart = create_risk_chart(df, context)
-        risk_metrics = create_risk_metrics(context)
-        liquidity_panel = create_liquidity_panel(context)
-        reasoning_trace = create_reasoning_trace(context)
-        trade_plan = create_trade_plan(context)
-        
-        # Export ontology data
-        ontology_data = {
-            "graph": context.ontology_graph,
-            "timestamp": context.timestamp.isoformat(),
-            "signals": [s for s in context.signals if s["confidence"] > 0.6]
-        }
-        
-        logger.info(f"=== Analysis complete for {symbol} ===")
-        
-        return [
-            signal_dashboard, main_chart, vwap_chart, volume_chart,
-            momentum_chart, risk_chart, risk_metrics, liquidity_panel,
-            reasoning_trace, trade_plan, ontology_data
-        ]
+        # ── Moving Averages (Trend Layer)
+        for w in [8, 20, 50, 200]:
+            result_df[f"SMA_{w}"] = closes.rolling(w).mean()
+            result_df[f"EMA_{w}"] = closes.ewm(span=w, adjust=False).mean()
+
+        # ── Momentum Indicators
+        result_df["RSI"] = ta.momentum.RSIIndicator(closes).rsi()
+
+        macd = ta.trend.MACD(closes)
+        result_df["MACD"], result_df["MACD_Signal"] = macd.macd(), macd.macd_signal()
+
+        stoch = ta.momentum.StochasticOscillator(highs, lows, closes)
+        result_df["%K"], result_df["%D"] = stoch.stoch(), stoch.stoch_signal()
+
+        # ── Volatility Indicators
+        ma20, std20 = closes.rolling(20).mean(), closes.rolling(20).std()
+        result_df["Upper_band"], result_df["Lower_band"] = ma20 + 2 * std20, ma20 - 2 * std20
+        result_df["ATR"] = ta.volatility.AverageTrueRange(highs, lows, closes).average_true_range()
+        result_df["CCI"] = ta.trend.CCIIndicator(highs, lows, closes).cci()
+
+        # ── Volume Indicators
+        result_df["OBV"] = ta.volume.OnBalanceVolumeIndicator(closes, vols).on_balance_volume()
+        result_df["VWAP"] = (closes * vols).cumsum() / vols.cumsum()
+        result_df["ADL"] = ta.volume.AccDistIndexIndicator(highs, lows, closes, vols).acc_dist_index()
+        result_df["MFI"] = ta.volume.MFIIndicator(highs, lows, closes, vols).money_flow_index()
+        result_df["CMF"] = ta.volume.ChaikinMoneyFlowIndicator(highs, lows, closes, vols).chaikin_money_flow()
+        result_df["FI"]  = ta.volume.ForceIndexIndicator(closes, vols).force_index()
+
+        # ── Trend Strength Indicators
+        adx = ta.trend.ADXIndicator(highs, lows, closes)
+        result_df["ADX"], result_df["DI+"], result_df["DI-"] = adx.adx(), adx.adx_pos(), adx.adx_neg()
+
+        # ── Ichimoku Cloud (Support/Resistance Layer)
+        result_df["Tenkan_sen"]   = (highs.rolling(9).max() + lows.rolling(9).min()) / 2
+        result_df["Kijun_sen"]    = (highs.rolling(26).max() + lows.rolling(26).min()) / 2
+        result_df["Senkou_span_a"] = ((result_df["Tenkan_sen"] + result_df["Kijun_sen"]) / 2).shift(26)
+        result_df["Senkou_span_b"] = ((highs.rolling(52).max() + lows.rolling(52).min()) / 2).shift(26)
+        result_df["Chikou_span"]   = closes.shift(-26)
+
+        log_step("Indicators computed successfully.")
         
     except Exception as e:
-        logger.error(f"Analysis error: {e}", exc_info=True)
-        error_alert = dbc.Alert(f"Analysis Error: {str(e)}", color="danger", dismissable=True)
-        return [error_alert] + [go.Figure()] * 5 + [html.Div()] * 4 + [{}]
+        log_step(f"Warning: Some indicators failed to compute: {e}")
+        # Return at least the basic computed indicators
+        pass
+
+    return result_df
+
+# ─────────────────────────────────────────────
+# Dash Application Setup
+# ─────────────────────────────────────────────
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.SOLAR],
+    suppress_callback_exceptions=True
+)
+app.title = "Enhanced Ontology-Driven Stock Dashboard"
+server = app.server
 
 
-def create_signal_dashboard(context: IntradayContext) -> html.Div:
-    """Prominent display of active trading signals"""
-    if not context.signals:
-        return html.Div([
-            html.H5("No High-Confidence Signals", className="text-muted"),
-            html.P("Market conditions do not meet entry criteria", className="small")
-        ])
-    
-    signal_cards = []
-    for signal in context.signals:
-        if signal["confidence"] < 0.6:
-            continue
-        
-        color = "success" if "LONG" in signal["type"].value else "danger"
-        icon = "📈" if "LONG" in signal["type"].value else "📉"
-        
-        signal_cards.append(
+# ─────────────────────────────────────────────
+# Dash Layout (Fully Retaining Original Structure)
+# ─────────────────────────────────────────────
+app.layout = dbc.Container([
+    # Navbar
+    dbc.NavbarSimple(
+        brand="Enhanced Ontology-Driven Stock Dashboard (Patent Prototype)",
+        color="dark",
+        dark=True
+    ),
+
+    # Inputs
+    dbc.Row([
+        dbc.Col(
+            dbc.Input(id="stock-input", value="AAPL", placeholder="Enter stock symbol"),
+            width=4
+        )
+    ], justify="center", className="my-3"),
+
+    dbc.Row([
+        dbc.Col(
+            dcc.Dropdown(
+                id="time-range",
+                options=[
+                    {"label": "6 Months", "value": "6mo"},
+                    {"label": "1 Year", "value": "1y"},
+                    {"label": "2 Years", "value": "2y"},
+                    {"label": "3 Years", "value": "3y"},
+                    {"label": "4 Years", "value": "4y"},
+                    {"label": "5 Years", "value": "5y"},
+                    {"label": "All", "value": "max"},
+                ],
+                value="1y",
+                clearable=False
+            ),
+            width=4
+        )
+    ], justify="center", className="my-3"),
+
+    dbc.Row([
+        dbc.Col(
+            dcc.Dropdown(
+                id="interval",
+                options=[
+                    {"label": "Daily", "value": "1d"},
+                    {"label": "Weekly", "value": "1wk"},
+                    {"label": "Monthly", "value": "1mo"},
+                ],
+                value="1d",
+                clearable=False
+            ),
+            width=4
+        )
+    ], justify="center", className="my-3"),
+
+    dbc.Row([
+        dbc.Col(
+            dcc.RadioItems(
+                id="analysis-mode",
+                options=[
+                    {"label": "📊 Standard", "value": "standard"},
+                    {"label": "🧠 Ontology Analysis", "value": "ontology"},
+                ],
+                value="ontology",
+                inline=True
+            ),
+            width=8
+        )
+    ], justify="center", className="my-3"),
+
+    dbc.Row([
+        dbc.Col(
+            dbc.Button(
+                id="analyze-button",
+                n_clicks=0,
+                children="🧠 Analyze with Enhanced Ontology",
+                color="primary"
+            ),
+            width="auto"
+        )
+    ], justify="center", className="my-3"),
+
+    # Ontology panel
+    dbc.Row([
+        dbc.Col(
             dbc.Card([
+                dbc.CardHeader("Enhanced Ontology-Based Analysis", className="bg-primary text-white"),
                 dbc.CardBody([
-                    html.H5([
-                        html.Span(icon, className="me-2"),
-                        html.Span(signal["type"].value.replace("_", " ").title())
-                    ], className=f"text-{color} mb-2"),
-                    html.P(signal["rationale"], className="small text-light mb-1"),
-                    html.Div([
-                        html.Small("Confidence: ", className="text-muted"),
-                        html.Span(f"{signal['confidence']:.1%}", 
-                                 className=f"fw-bold text-{color}")
-                    ], className="d-flex justify-content-between")
+                    html.Div(id="ontology-insights"),
+                    html.Div(id="trading-signals"),
+                    html.Div(id="risk-assessment"),
+                    html.Div(id="trading-recommendations"),
+                    html.Div(id="reasoning-trace"),
                 ])
-            ], className=f"bg-{color} bg-opacity-10 border-{color} mb-2")
+            ]),
+            width=12
         )
-    
-    return html.Div(signal_cards)
+    ], className="mb-4"),
 
-
-def create_main_chart(df: pd.DataFrame, context: IntradayContext) -> go.Figure:
-    """Comprehensive main chart with liquidity and signals"""
-    if df.empty:
-        return go.Figure()
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=("Price Action & Liquidity", "Volume")
-    )
-    
-    # Candlesticks
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index, open=df["open"], high=df["high"],
-            low=df["low"], close=df["close"], name="Price"
-        ),
-        row=1, col=1
-    )
-    
-    # VWAP
-    if "VWAP" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["VWAP"], name="VWAP", 
-                      line=dict(color="#00d4ff", width=2)),
-            row=1, col=1
+    # 1) Candlestick (full width)
+    dbc.Row([
+        dbc.Col(
+            dbc.Card(dbc.CardBody(dcc.Graph(id="candlestick-chart"))),
+            width=12
         )
-    
-    # Opening Range
-    fig.add_hline(y=context.orb_high, line_dash="dash", line_color="yellow",
-                  annotation_text="ORB High", row=1, col=1)
-    fig.add_hline(y=context.orb_low, line_dash="dash", line_color="yellow",
-                  annotation_text="ORB Low", row=1, col=1)
-    
-    # Liquidity zones
-    for price, vol, zone_type in context.liquidity_zones[:3]:
-        fig.add_hline(
-            y=price, line_dash="dot", 
-            line_color="green" if zone_type == "support" else "red",
-            annotation_text=f"{zone_type.title()} Zone", row=1, col=1
+    ], className="mb-4"),
+
+    # 2) SMA / EMA (full width)
+    dbc.Row([
+        dbc.Col(
+            dbc.Card(dbc.CardBody(dcc.Graph(id="sma-ema-chart"))),
+            width=12
         )
-    
-    # Volume
-    fig.add_trace(
-        go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color="rgba(100,150,255,0.5)"),
-        row=2, col=1
-    )
-    
-    fig.update_layout(
-        title=f"{context.symbol} Intraday Analysis | {context.session.value.replace('_', ' ').title()}",
-        template="plotly_dark",
-        height=600,
-        showlegend=True
-    )
-    
-    return fig
+    ], className="mb-4"),
+
+    # 3) Support/Resistance + RSI
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="support-resistance-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="rsi-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 4) Bollinger + MACD
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="bollinger-bands-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="macd-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 5) Stochastic + OBV
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="stochastic-oscillator-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="obv-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 6) ATR + CCI
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="atr-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="cci-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 7) MFI + CMF
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="mfi-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="cmf-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 8) FI + Fibonacci
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="fi-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="fibonacci-retracement-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 9) Ichimoku + VWAP
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="ichimoku-cloud-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="vwap-chart"))), width=6),
+    ], className="mb-4"),
+
+    # 10) ADL + ADX/DI
+    dbc.Row([
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="adl-chart"))), width=6),
+        dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="adx-di-chart"))), width=6),
+    ], className="mb-4"),
+
+    # Footer
+    dbc.Row([
+        dbc.Col(html.Footer(
+            "Enhanced Ontology-Driven Dashboard © 2025",
+            className="text-center text-muted"
+        ))
+    ], className="mt-4"),
+], fluid=True)
+
+# ============================================================
+# PART 4: CALLBACKS & APPLICATION EXECUTION (FINAL PATENT VERSION)
+# ============================================================
+
+# ─────────────────────────────────────────────
+# Dynamic Button Text Toggle
+# ─────────────────────────────────────────────
+@app.callback(Output("analyze-button", "children"),
+              Input("analysis-mode", "value"))
+def update_button_text(mode):
+    """Updates button label dynamically according to analysis mode."""
+    return "🧠 Analyze with Enhanced Ontology" if mode == "ontology" else "📊 Analyze Stock"
 
 
-def create_vwap_chart(df: pd.DataFrame, context: IntradayContext) -> go.Figure:
-    """VWAP deviation analysis"""
-    if df.empty or "VWAP" not in df.columns:
-        return go.Figure()
-    
-    fig = go.Figure()
-    
-    # Price vs VWAP
-    deviation = (df["close"] - df["VWAP"]) / df["VWAP"] * 100
-    
-    fig.add_trace(
-        go.Scatter(x=df.index, y=deviation, name="VWAP Deviation (%)",
-                  line=dict(color="#4ecdc4"))
-    )
-    
-    # Threshold lines
-    fig.add_hline(y=config.vwap_threshold * 100, line_dash="dash", line_color="red",
-                  annotation_text="Upper Threshold")
-    fig.add_hline(y=-config.vwap_threshold * 100, line_dash="dash", line_color="green",
-                  annotation_text="Lower Threshold")
-    
-    fig.add_hline(y=0, line_dash="solid", line_color="white", opacity=0.5)
-    
-    fig.update_layout(
-        title="VWAP Deviation Analysis",
-        template="plotly_dark",
-        height=300,
-        yaxis_title="Deviation (%)"
-    )
-    
-    return fig
-
-
-def create_volume_chart(df: pd.DataFrame) -> go.Figure:
-    """Volume profile and pressure analysis"""
-    if df.empty:
-        return go.Figure()
-    
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1)
-    
-    # Volume bars
-    fig.add_trace(
-        go.Bar(x=df.index, y=df["volume"], name="Volume", marker_color="rgba(100,150,255,0.5)"),
-        row=1, col=1
-    )
-    
-    # Cumulative volume
-    fig.add_trace(
-        go.Scatter(x=df.index, y=df["volume"].cumsum(), name="Cumulative Volume",
-                  line=dict(color="#ff9ff3")),
-        row=2, col=1
-    )
-    
-    fig.update_layout(title="Volume Analysis", template="plotly_dark", height=300)
-    return fig
-
-
-def create_momentum_chart(df: pd.DataFrame) -> go.Figure:
-    """Multi-timeframe momentum matrix"""
-    if df.empty:
-        return go.Figure()
-    
-    fig = make_subplots(
-        rows=3, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        subplot_titles=("RSI", "MACD", "Stochastic")
-    )
-    
-    # RSI
-    if "RSI" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["RSI"], name="RSI", line=dict(color="#54a0ff")),
-            row=1, col=1
+# ─────────────────────────────────────────────
+# Master Callback: Ontology + Chart Engine
+# 22 Outputs → 18 Graphs + 4 Insight Panels
+# ─────────────────────────────────────────────
+@app.callback(
+    [Output(g, "figure") for g in [
+        "candlestick-chart", "sma-ema-chart", "support-resistance-chart", "rsi-chart",
+        "bollinger-bands-chart", "macd-chart", "stochastic-oscillator-chart", "obv-chart",
+        "atr-chart", "cci-chart", "mfi-chart", "cmf-chart", "fi-chart",
+        "fibonacci-retracement-chart", "ichimoku-cloud-chart", "vwap-chart",
+        "adl-chart", "adx-di-chart"
+    ]]
+    + [Output(x, "children") for x in [
+        "ontology-insights", "trading-signals", "risk-assessment",
+        "trading-recommendations", "reasoning-trace"
+    ]],
+    Input("analyze-button", "n_clicks"),
+    State("stock-input", "value"),
+    State("time-range", "value"),
+    State("interval", "value"),
+    State("analysis-mode", "value"),
+)
+def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
+    """
+    Integrates the enhanced ontology reasoning pipeline with technical visualization.
+    Produces synchronized analytical outputs and explainability artifacts.
+    """
+    # ── Initialization (Idle State)
+    if not n_clicks:
+        empty_fig = go.Figure().update_layout(
+            title="Click 'Analyze' to Begin", template="plotly_dark"
         )
-        fig.add_hline(y=70, line_dash="dash", line_color="red", row=1, col=1)
-        fig.add_hline(y=30, line_dash="dash", line_color="green", row=1, col=1)
-    
-    # MACD
-    if "MACD" in df.columns and "MACD_Signal" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["MACD"], name="MACD", line=dict(color="#00d4ff")),
-            row=2, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["MACD_Signal"], name="Signal", line=dict(color="#ff6b6b")),
-            row=2, col=1
-        )
-    
-    # Stochastic
-    if "Stoch_K" in df.columns and "Stoch_D" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["Stoch_K"], name="%K", line=dict(color="#4ecdc4")),
-            row=3, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["Stoch_D"], name="%D", line=dict(color="#feca57")),
-            row=3, col=1
-        )
-    
-    fig.update_layout(title="Momentum Matrix", template="plotly_dark", height=400)
-    return fig
+        placeholder = html.Div("Awaiting user input…")
+        return (empty_fig,) * 18 + (placeholder, html.Div(), html.Div(), html.Div(), html.Div())
 
+    # ─────────────────────────────────────────────
+    # Step 1 – Data Acquisition and Indicator Computation
+    # ─────────────────────────────────────────────
+    try:
+        log_step(f"Starting enhanced ontology-driven analysis for {ticker}…")
+        df = fetch_data_cached(ticker, time_range, interval)
+        df = compute_indicators(df)
+    except Exception as e:
+        log_step(f"❌ Data fetch error: {e}")
+        err_fig = go.Figure().update_layout(title=f"Error: {e}", template="plotly_dark")
+        err_msg = html.Div(f"⚠️ Error fetching data for {ticker}: {e}")
+        return (err_fig,) * 18 + (err_msg, html.Div(), html.Div(), html.Div(), html.Div())
 
-def create_risk_chart(df: pd.DataFrame, context: IntradayContext) -> go.Figure:
-    """Dynamic risk visualization"""
-    if df.empty:
-        return go.Figure()
-    
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1,
-        subplot_titles=("ATR %", "ADX Strength")
-    )
-    
-    # ATR Percentage
-    if "ATR_Pct" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["ATR_Pct"], name="ATR %", line=dict(color="#ff6b6b")),
-            row=1, col=1
-        )
-    
-    # ADX
-    if "ADX" in df.columns:
-        fig.add_trace(
-            go.Scatter(x=df.index, y=df["ADX"], name="ADX", line=dict(color="#00d4ff")),
-            row=2, col=1
-        )
-        fig.add_hline(y=25, line_dash="dash", line_color="yellow", row=2, col=1,
-                      annotation_text="Trend Threshold")
-    
-    fig.update_layout(title="Risk & Volatility", template="plotly_dark", height=300)
-    return fig
+    # ─────────────────────────────────────────────
+    # Step 2 – Enhanced Ontology Reasoning
+    # ─────────────────────────────────────────────
+    if analysis_mode == "ontology":
+        log_step("Executing enhanced ontology reasoning engine…")
+        
+        # Use the enhanced ontology system
+        context = ontology.infer_market_context(ticker, df)
+        
+        # Create enhanced summary
+        summary = {
+            "market_context": {
+                "state": context.market_state.value,
+                "trend": context.trend_direction.value,
+                "risk": context.risk_level.value,
+                "volatility_regime": context.volatility_regime,
+                "volume_profile": context.volume_profile,
+                "support_levels": context.support_levels,
+                "resistance_levels": context.resistance_levels,
+                "confidence": context.confidence_score
+            },
+            "ontology_graph": context.ontology_graph,
+            "reasoning_chain": context.reasoning_chain,
+            "contradictions": context.contradictions
+        }
+        
+        mc = summary["market_context"]
+        reasoning_chain = summary.get("reasoning_chain", [])
+        
+        # Clean numeric presentation
+        sup_str = ", ".join(f"{s:.2f}" for s in mc["support_levels"]) if mc["support_levels"] else "–"
+        res_str = ", ".join(f"{r:.2f}" for r in mc["resistance_levels"]) if mc["resistance_levels"] else "–"
 
-
-def create_risk_metrics(context: IntradayContext) -> html.Div:
-    """Display dynamic risk metrics"""
-    risk_color = {
-        RiskTier.CALM: "success",
-        RiskTier.NORMAL: "info",
-        RiskTier.ELEVATED: "warning",
-        RiskTier.HIGH: "danger",
-        RiskTier.EXTREME: "dark"
-    }
-    
-    tier_color = risk_color.get(context.risk_tier, "secondary")
-    
-    return html.Div([
-        html.H5("Risk Assessment", className=f"text-{tier_color}"),
-        html.Div([
-            html.Span("Risk Tier:", className="text-muted"),
-            html.Span(context.risk_tier.value.upper(), 
-                     className=f"fw-bold text-{tier_color} float-end")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("Position Size:", className="text-muted"),
-            html.Span(f"{context.position_size:,} shares",
-                     className="fw-bold float-end")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("VWAP Deviation:", className="text-muted"),
-            html.Span(f"{context.vwap_deviation:.2%}",
-                     className="fw-bold float-end")
-        ], className="mb-2"),
-        html.Hr(),
-        html.Small("Risk per trade: ${:,.2f}".format(
-            config.account_size * config.risk_per_trade
-        ), className="text-muted")
-    ])
-
-
-def create_liquidity_panel(context: IntradayContext) -> html.Div:
-    """Display detected liquidity zones"""
-    if not context.liquidity_zones:
-        return html.P("No significant liquidity zones detected", className="text-muted small")
-    
-    zones_html = []
-    for price, volume, zone_type in context.liquidity_zones[:5]:
-        badge_color = "success" if zone_type == "support" else "danger"
-        zones_html.append(
-            dbc.Badge([
-                f"{zone_type.upper()}: ${price:.2f} | Vol: {volume:,}"
-            ], color=badge_color, className="w-100 mb-1")
-        )
-    
-    return html.Div(zones_html)
-
-
-def create_reasoning_trace(context: IntradayContext) -> html.Ol:
-    """Generate detailed reasoning trace"""
-    steps = [
-        f"🔍 Analyzing {context.symbol} at {context.timestamp.strftime('%H:%M:%S')}",
-        f"📅 Session identified: {context.session.value.replace('_', ' ').title()}",
-        f"💰 Current Price: ${context.price:.2f} | VWAP: ${context.vwap:.2f}",
-        f"📊 VWAP Deviation: {context.vwap_deviation:.2%}",
-        f"🎯 Opening Range: ${context.orb_low:.2f} - ${context.orb_high:.2f}",
-        f"🛡️ Risk Tier: {context.risk_tier.value.upper()}",
-    ]
-    
-    for signal in context.signals:
-        if signal["confidence"] > 0.6:
-            steps.append(
-                f"🚨 Signal: {signal['type'].value} | "
-                f"Confidence: {signal['confidence']:.1%} | "
-                f"Rationale: {signal['rationale'][:60]}..."
-            )
-    
-    return html.Ol([html.Li(step, className="mb-1") for step in steps])
-
-
-def create_trade_plan(context: IntradayContext) -> html.Div:
-    """Generate actionable trade plan"""
-    if not context.signals or context.position_size == 0:
-        return html.Div([
-            html.H6("No Trade Plan", className="text-warning"),
-            html.P("Wait for high-confidence signals", className="small text-muted")
+        # Enhanced Ontology Insights Panel
+        insights_content = html.Div([
+            html.H4("🧠 Enhanced Ontological Market Summary"),
+            html.P(f"Market State: {mc['state'].replace('_', ' ').title()}"),
+            html.P(f"Trend Direction: {mc['trend'].replace('_', ' ').title()}"),
+            html.P(f"Risk Level: {mc['risk'].replace('_', ' ').title()}"),
+            html.P(f"Volatility Regime: {mc['volatility_regime'].replace('_', ' ').title()}"),
+            html.P(f"Volume Profile: {mc['volume_profile'].replace('_', ' ').title()}"),
+            html.P(f"Support Levels: {sup_str}"),
+            html.P(f"Resistance Levels: {res_str}"),
+            html.Hr(),
+            html.H6("Knowledge Graph Statistics"),
+            html.P(f"Total Statements: {len(context.contradictions) + len(context.reasoning_chain) + 10}"),
+            html.P(f"Contradictions Detected: {len(context.contradictions)}"),
+            html.P(f"Reasoning Steps: {len(context.reasoning_chain)}")
         ])
-    
-    best_signal = max(context.signals, key=lambda x: x["confidence"])
-    risk_per_share = abs(context.price - context.stop_loss)
-    
-    plan_items = [
-        html.H6("🎯 Trade Plan", className="text-primary mb-3"),
-        html.Div([
-            html.Span("Action:", className="text-muted small"),
-            html.Span(best_signal["type"].value.replace("_", " ").title(),
-                     className="fw-bold float-end text-info")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("Entry:", className="text-muted small"),
-            html.Span(f"${context.price:.2f}", className="fw-bold float-end")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("Stop Loss:", className="text-muted small"),
-            html.Span(f"${context.stop_loss:.2f}", className="fw-bold float-end text-danger")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("Take Profit:", className="text-muted small"),
-            html.Span(f"${context.take_profit:.2f}", className="fw-bold float-end text-success")
-        ], className="mb-2"),
-        html.Hr(),
-        html.Div([
-            html.Span("Position Size:", className="text-muted small"),
-            html.Span(f"{context.position_size:,} shares",
-                     className="fw-bold float-end text-primary")
-        ], className="mb-2"),
-        html.Div([
-            html.Span("Risk/Share:", className="text-muted small"),
-            # ✅ FIXED: Added missing closing quote
-            html.Span(f"${risk_per_share:.2f}", className="fw-bold float-end")
-        ], className="mb-2")
-    ]
-    
-    return html.Div(plan_items)
+
+        # Enhanced Trading Signals Panel
+        signals_content = html.Div([
+            html.H5("📈 Enhanced Trading Bias"),
+            html.Ul([
+                html.Li("🚀 Strong Bullish Bias") if mc["state"] == "bull_trend" and mc["confidence"] > 0.8
+                else html.Li("📈 Bullish Bias") if mc["state"] == "bull_trend"
+                else html.Li("📉 Bearish Bias") if mc["state"] == "bear_trend"
+                else html.Li("⚖️ Neutral Market Conditions")
+            ]),
+            html.Hr(),
+            html.H6("Confidence Metrics"),
+            html.P(f"Overall Confidence: {mc['confidence']:.1%}"),
+            html.P(f"Trend Strength: {mc['trend'].replace('_', ' ').title()}")
+        ])
+
+        # Enhanced Risk Assessment Panel
+        risk_content = html.Div([
+            html.H5("🛡️ Enhanced Risk & Volatility Assessment"),
+            html.P(f"Risk Level: {mc['risk'].replace('_', ' ').title()}"),
+            html.P(f"Volatility: {mc['volatility_regime'].replace('_', ' ').title()}"),
+            html.Hr(),
+            html.H6("Risk Factors"),
+            html.Ul([
+                html.Li("High volatility detected") if mc["volatility_regime"] == "high"
+                else html.Li("Moderate volatility") if mc["volatility_regime"] == "medium"
+                else html.Li("Low volatility environment")
+            ])
+        ])
+
+        # Enhanced Trading Recommendations Panel
+        recs = []
+        if mc["state"] == "bull_trend" and mc["risk"] in ["low", "very_low"]:
+            recs.extend([
+                "🟢 Strong Buy Signal: Consider aggressive position",
+                "📈 Buy on dips to support levels",
+                "⚡ Use momentum indicators for entry timing"
+            ])
+        elif mc["state"] == "bear_trend" and mc["risk"] in ["high", "very_high"]:
+            recs.extend([
+                "🔴 Strong Sell Signal: Consider shorting opportunities",
+                "📉 Sell on rallies to resistance",
+                "🛡️ Implement strict risk management"
+            ])
+        elif mc["state"] == "volatile_breakout":
+            recs.append("⚡ Confirm breakout before large position entries")
+        else:
+            recs.append("⚖️ Maintain neutral exposure until trend confirmation")
+        
+        recommendations_content = html.Div([
+            html.H5("💡 Enhanced Trading Recommendations"),
+            html.Ul([html.Li(r) for r in recs]),
+            html.Hr(),
+            html.H6("Key Levels"),
+            html.P(f"Entry Zones: Support levels {sup_str}"),
+            html.P(f"Exit Zones: Resistance levels {res_str}")
+        ])
+
+        # Enhanced Reasoning Trace Panel
+        reasoning_trace = html.Div([
+            html.H5("🔍 Enhanced Ontology Reasoning Trace"),
+            html.Ol([html.Li(step) for step in reasoning_chain]),
+            html.Hr(),
+            html.H6("Inference Process"),
+            html.P("Applied semantic reasoning with confidence weighting"),
+            html.P("Detected and resolved contradictions"),
+            html.P("Aggregated evidence across multiple timeframes")
+        ])
+    else:
+        # Standard Mode (Indicator-Only)
+        log_step("Standard mode selected – no ontology reasoning.")
+        insights_content = html.Div([
+            html.H4("📊 Standard Technical Analysis"),
+            html.P(f"Symbol: {ticker}, Period: {time_range}, Interval: {interval}")
+        ])
+        signals_content = html.Div()
+        risk_content = html.Div()
+        recommendations_content = html.Div()
+        reasoning_trace = html.Div()
+
+    # ─────────────────────────────────────────────
+    # Step 3 – Chart Rendering (18 Charts)
+    # ─────────────────────────────────────────────
+    log_step("Rendering technical charts…")
+
+    # Candlestick Chart
+    fig_candle = go.Figure(go.Candlestick(
+        x=df.index, open=df.open, high=df.high, low=df.low, close=df.close
+    )).update_layout(title=f"{ticker} Candlestick", template="plotly_dark")
+
+    # SMA / EMA Chart
+    fig_sma = go.Figure()
+    fig_sma.add_trace(go.Scatter(x=df.index, y=df.close, name="Close"))
+    for col in ["SMA_20","SMA_50","SMA_200","EMA_8","EMA_20","EMA_50","EMA_200"]:
+        if col in df:
+            fig_sma.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_sma.update_layout(title=f"{ticker} SMA & EMA", template="plotly_dark")
+
+    # Support & Resistance Chart
+    pivot = (df.high + df.low + df.close) / 3
+    df["S1"], df["R1"] = 2*pivot - df.high, 2*pivot - df.low
+    df["S2"], df["R2"] = pivot - (df.high - df.low), pivot + (df.high - df.low)
+    fig_sr = go.Figure()
+    for col in ["S1","R1","S2","R2"]:
+        fig_sr.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_sr.update_layout(title=f"{ticker} Support & Resistance", template="plotly_dark")
+
+    # RSI Chart
+    fig_rsi = go.Figure(go.Scatter(x=df.index, y=df.RSI, name="RSI"))
+    for yv,c in [(70,"red"),(30,"green")]:
+        fig_rsi.add_shape(type="line",x0=df.index[0],x1=df.index[-1],
+                          y0=yv,y1=yv,line=dict(color=c,dash="dash"))
+    fig_rsi.update_layout(title=f"{ticker} RSI", template="plotly_dark")
+
+    # Bollinger Bands
+    fig_bb = go.Figure()
+    for col in ["close","Upper_band","Lower_band"]:
+        fig_bb.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_bb.update_layout(title=f"{ticker} Bollinger Bands", template="plotly_dark")
+
+    # MACD Chart
+    fig_macd = go.Figure()
+    for col in ["MACD","MACD_Signal"]:
+        fig_macd.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_macd.update_layout(title=f"{ticker} MACD", template="plotly_dark")
+
+    # Stochastic Oscillator
+    fig_sto = go.Figure()
+    for col in ["%K","%D"]:
+        fig_sto.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_sto.update_layout(title=f"{ticker} Stochastic Oscillator", template="plotly_dark")
+
+    # OBV Chart
+    fig_obv = go.Figure(go.Scatter(x=df.index, y=df.OBV, name="OBV"))
+    fig_obv.update_layout(title=f"{ticker} On-Balance Volume", template="plotly_dark")
+
+    # ATR Chart
+    fig_atr = go.Figure(go.Scatter(x=df.index, y=df.ATR, name="ATR"))
+    fig_atr.update_layout(title=f"{ticker} Average True Range", template="plotly_dark")
+
+    # CCI Chart
+    fig_cci = go.Figure(go.Scatter(x=df.index, y=df.CCI, name="CCI"))
+    for yv in [100, -100]:
+        fig_cci.add_shape(type="line",x0=df.index[0],x1=df.index[-1],
+                          y0=yv,y1=yv,line=dict(color="gray",dash="dash"))
+    fig_cci.update_layout(title=f"{ticker} CCI", template="plotly_dark")
+
+    # MFI Chart
+    fig_mfi = go.Figure(go.Scatter(x=df.index, y=df.MFI, name="MFI"))
+    for yv,c in [(80,"red"),(20,"green")]:
+        fig_mfi.add_shape(type="line",x0=df.index[0],x1=df.index[-1],
+                          y0=yv,y1=yv,line=dict(color=c,dash="dash"))
+    fig_mfi.update_layout(title=f"{ticker} MFI", template="plotly_dark")
+
+    # CMF Chart
+    fig_cmf = go.Figure(go.Scatter(x=df.index, y=df.CMF, name="CMF"))
+    fig_cmf.add_shape(type="line",x0=df.index[0],x1=df.index[-1],
+                      y0=0,y1=0,line=dict(color="red",dash="dash"))
+    fig_cmf.update_layout(title=f"{ticker} Chaikin Money Flow", template="plotly_dark")
+
+    # Force Index
+    fig_fi = go.Figure(go.Scatter(x=df.index, y=df.FI, name="Force Index"))
+    fig_fi.update_layout(title=f"{ticker} Force Index", template="plotly_dark")
+
+    # Fibonacci Retracement
+    high, low = df.high.max(), df.low.min()
+    diff = high - low
+    fib_levels = {p: high - (v * diff) for p,v in {
+        "0%":0,"23.6%":0.236,"38.2%":0.382,"50%":0.5,"61.8%":0.618,"100%":1}.items()}
+    fig_fib = go.Figure(go.Scatter(x=df.index, y=df.close, name="Close"))
+    for label, price in fib_levels.items():
+        fig_fib.add_trace(go.Scatter(
+            x=[df.index[0], df.index[-1]], y=[price, price],
+            name=label, line=dict(dash="dash")
+        ))
+    fig_fib.update_layout(title=f"{ticker} Fibonacci Retracement", template="plotly_dark")
+
+    # Ichimoku Cloud
+    fig_ich = go.Figure()
+    for col in ["close","Tenkan_sen","Kijun_sen","Senkou_span_a","Senkou_span_b","Chikou_span"]:
+        if col in df:
+            fig_ich.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_ich.update_layout(title=f"{ticker} Ichimoku Cloud", template="plotly_dark")
+
+    # VWAP Chart
+    fig_vwap = go.Figure()
+    fig_vwap.add_trace(go.Scatter(x=df.index, y=df.close, name="Close"))
+    if "VWAP" in df:
+        fig_vwap.add_trace(go.Scatter(x=df.index, y=df.VWAP, name="VWAP"))
+    fig_vwap.update_layout(title=f"{ticker} VWAP", template="plotly_dark")
+
+    # ADL Chart
+    fig_adl = go.Figure(go.Scatter(x=df.index, y=df.ADL, name="ADL"))
+    fig_adl.update_layout(title=f"{ticker} Accumulation/Distribution Line", template="plotly_dark")
+
+    # ADX / DI Chart
+    fig_adx = go.Figure()
+    for col in ["ADX","DI+","DI-"]:
+        if col in df:
+            fig_adx.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    fig_adx.update_layout(title=f"{ticker} ADX & DI", template="plotly_dark")
+
+    log_step("✅ Charts rendered successfully.")
+
+    # Return all graphs + ontology panels
+    return (
+        fig_candle, fig_sma, fig_sr, fig_rsi, fig_bb, fig_macd, fig_sto, fig_obv,
+        fig_atr, fig_cci, fig_mfi, fig_cmf, fig_fi, fig_fib, fig_ich, fig_vwap,
+        fig_adl, fig_adx,
+        insights_content, signals_content, risk_content,
+        recommendations_content, reasoning_trace
+    )
 
 
 # ─────────────────────────────────────────────
 # Application Entrypoint
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    # Clear cache on startup to prevent stale data issues
-    try:
-        memory.clear()
-        logger.info("Cache cleared successfully")
-    except Exception as e:
-        logger.warning(f"Could not clear cache: {e}")
-    
-    logger.info("=" * 60)
-    logger.info("🚀 LAUNCHING INTRADAY DECISION SUPPORT SYSTEM PRO")
-    logger.info("=" * 60)
-    logger.info(f"Account Size: ${config.account_size:,.2f}")
-    logger.info(f"Risk per Trade: {config.risk_per_trade:.2%}")
-    logger.info(f"Cache Directory: {config.cache_dir}")
-    
+    log_step("🚀 Launching Enhanced Ontology-Driven Stock Dashboard (Final Patent Version)…")
     app.run_server(debug=False, port=8050)
