@@ -8,5 +8,7 @@ yahooquery
 rdflib
 joblib
 pydantic
+pyshacl
 gunicorn
 owlrl
+
