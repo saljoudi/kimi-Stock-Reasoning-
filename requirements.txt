@@ -1,3 +1,4 @@
+# requirements.txt
 dash
 dash-bootstrap-components
 plotly
@@ -11,4 +12,3 @@ pydantic
 pyshacl
 gunicorn
 owlrl
-
