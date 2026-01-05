@@ -2,12 +2,6 @@
 # coding: utf-8
 
 # ============================================================
-# PART 1: ENHANCED ONTOLOGY FOUNDATION
-# ============================================================
-#!/usr/bin/env python
-# coding: utf-8
-
-# ============================================================
 # PART 1: ENTERPRISE CONFIGURATION & ONTOLOGY FOUNDATION
 # ============================================================
 from pyshacl import validate
@@ -46,8 +40,8 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html, Dash, Input, Output, State
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-
+import plotly.express as px
+import networkx as nx
 
 # ─────────────────────────────────────────────
 # GLOBAL SETTINGS
@@ -63,8 +57,6 @@ def log_step(message: str):
 
 # ─────────────────────────────────────────────
 # ENHANCED ONTOLOGY VOCABULARY
-# ─────────────────────────────────────────────
-# ENHANCED ONTOLOGY VOCABULARY (Fixed)
 # ─────────────────────────────────────────────
 STOCK = Namespace("http://example.org/stock#")
 TECH = Namespace("http://example.org/technical#")
@@ -299,6 +291,7 @@ class EnhancedStockOntologyGraph:
         
         if confidence < 1.0:
             ev_uri = URIRef(f"{EVIDENCE}ev_state_{hash(indicator_uri)}")
+            self.g.add((ev_uri, RDF.type, EVIDENCE.EvidenceBundle))
             self.g.add((ev_uri, EVIDENCE.hasConfidence, Literal(confidence)))
             self.g.add((ev_uri, EVIDENCE.supports, indicator_uri))
         
@@ -616,6 +609,62 @@ class EnhancedStockOntologyGraph:
         }
         
         return summary
+
+    def build_network_graph(self) -> Dict[str, Any]:
+        """Builds a network graph for visualization using NetworkX."""
+        G = nx.Graph()
+        
+        # Add nodes for indicators with their properties
+        indicators = list(self.g.subjects(RDF.type, STOCK.Indicator))
+        for indicator in indicators:
+            # Get indicator name
+            indicator_name = str(indicator).split("#")[-1]
+            
+            # Get signal and confidence
+            signal = list(self.g.objects(indicator, STOCK.hasSignal))
+            conf = list(self.g.objects(indicator, STOCK.hasConfidence))
+            
+            node_data = {
+                "name": indicator_name,
+                "type": "indicator",
+                "signal": str(signal[0]) if signal else "unknown",
+                "confidence": float(conf[0]) if conf else 0.5
+            }
+            
+            G.add_node(indicator_name, **node_data)
+        
+        # Add edges for relationships
+        # Confirmations
+        for ind1, ind2 in self.find_confirmations():
+            ind1_name = str(ind1).split("#")[-1]
+            ind2_name = str(ind2).split("#")[-1]
+            G.add_edge(ind1_name, ind2_name, relationship="confirms", weight=1.0)
+        
+        # Contradictions
+        for ind1, ind2, strength in self.detect_contradictions():
+            ind1_name = str(ind1).split("#")[-1]
+            ind2_name = str(ind2).split("#")[-1]
+            G.add_edge(ind1_name, ind2_name, relationship="contradicts", weight=strength)
+        
+        # Add market state nodes
+        market_states = list(self.g.subjects(RDF.type, MARKET.MarketState))
+        for state in market_states:
+            state_name = str(state).split("#")[-1]
+            G.add_node(state_name, type="market_state", name=state_name)
+            
+            # Connect indicators to market states
+            indicators_for_state = list(self.g.subjects(STOCK.impliesState, state))
+            for indicator in indicators_for_state:
+                ind_name = str(indicator).split("#")[-1]
+                if ind_name in G.nodes():
+                    G.add_edge(ind_name, state_name, relationship="implies", weight=0.8)
+        
+        return {
+            "graph": G,
+            "node_count": G.number_of_nodes(),
+            "edge_count": G.number_of_edges(),
+            "components": nx.number_connected_components(G)
+        }
 
 # Maintain original function signatures for backward compatibility
 class EnhancedStockAnalysisOntology:
@@ -1552,6 +1601,19 @@ app.layout = dbc.Container([
         )
     ], className="mb-4"),
 
+    # Knowledge Graph Visualization
+    dbc.Row([
+        dbc.Col(
+            dbc.Card([
+                dbc.CardHeader("Ontology Knowledge Graph Visualization", className="bg-success text-white"),
+                dbc.CardBody([
+                    dcc.Graph(id="knowledge-graph-visualization")
+                ])
+            ]),
+            width=12
+        )
+    ], className="mb-4"),
+
     # 1) Candlestick (full width)
     dbc.Row([
         dbc.Col(
@@ -1610,7 +1672,7 @@ app.layout = dbc.Container([
         dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="vwap-chart"))), width=6),
     ], className="mb-4"),
 
-    # 10) ADL + ADX/DI
+    # 10) ADL + ADX/DI (Updated colors)
     dbc.Row([
         dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="adl-chart"))), width=6),
         dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="adx-di-chart"))), width=6),
@@ -1639,6 +1701,178 @@ def update_button_text(mode):
     return "🧠 Analyze with Enhanced Ontology" if mode == "ontology" else "📊 Analyze Stock"
 
 
+def create_knowledge_graph_figure(ontology_graph):
+    """Creates a knowledge graph visualization using NetworkX and Plotly."""
+    if not ontology_graph or ontology_graph.g is None:
+        # Return empty figure with message
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No ontology graph data available",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=16)
+        )
+        fig.update_layout(
+            title="Knowledge Graph Visualization",
+            template="plotly_dark",
+            showlegend=False
+        )
+        return fig
+    
+    try:
+        # Build network graph from ontology
+        network_data = ontology_graph.build_network_graph()
+        G = network_data["graph"]
+        
+        if G.number_of_nodes() == 0:
+            fig = go.Figure()
+            fig.add_annotation(
+                text="No nodes in knowledge graph",
+                xref="paper", yref="paper",
+                x=0.5, y=0.5,
+                showarrow=False,
+                font=dict(size=16)
+            )
+            fig.update_layout(
+                title="Knowledge Graph Visualization",
+                template="plotly_dark",
+                showlegend=False
+            )
+            return fig
+        
+        # Use spring layout for positioning
+        pos = nx.spring_layout(G, k=3, iterations=50)
+        
+        # Extract node positions
+        node_x = []
+        node_y = []
+        node_text = []
+        node_color = []
+        node_size = []
+        
+        for node in G.nodes():
+            x, y = pos[node]
+            node_x.append(x)
+            node_y.append(y)
+            
+            # Get node attributes
+            node_attrs = G.nodes[node]
+            node_type = node_attrs.get('type', 'unknown')
+            signal = node_attrs.get('signal', 'unknown')
+            confidence = node_attrs.get('confidence', 0.5)
+            
+            # Format node text
+            node_text.append(f"{node}<br>Signal: {signal}<br>Confidence: {confidence:.2f}")
+            
+            # Color nodes by type
+            if node_type == 'indicator':
+                if 'bullish' in signal:
+                    node_color.append('green')
+                elif 'bearish' in signal:
+                    node_color.append('red')
+                else:
+                    node_color.append('blue')
+            elif node_type == 'market_state':
+                node_color.append('orange')
+            else:
+                node_color.append('purple')
+                
+            # Size nodes by confidence
+            node_size.append(15 + (confidence * 20))
+        
+        # Create edge traces
+        edge_x = []
+        edge_y = []
+        edge_colors = []
+        edge_widths = []
+        
+        for edge in G.edges():
+            x0, y0 = pos[edge[0]]
+            x1, y1 = pos[edge[1]]
+            edge_x.extend([x0, x1, None])
+            edge_y.extend([y0, y1, None])
+            
+            # Get edge attributes
+            edge_attrs = G.edges[edge]
+            relationship = edge_attrs.get('relationship', 'unknown')
+            weight = edge_attrs.get('weight', 0.5)
+            
+            # Color edges by relationship type
+            if relationship == 'confirms':
+                edge_colors.append('green')
+            elif relationship == 'contradicts':
+                edge_colors.append('red')
+            elif relationship == 'implies':
+                edge_colors.append('orange')
+            else:
+                edge_colors.append('gray')
+                
+            edge_widths.append(1 + (weight * 3))
+        
+        # Create edge trace
+        edge_trace = go.Scatter(
+            x=edge_x, y=edge_y,
+            line=dict(width=1, color='gray'),
+            hoverinfo='none',
+            mode='lines',
+            showlegend=False
+        )
+        
+        # Create node trace
+        node_trace = go.Scatter(
+            x=node_x, y=node_y,
+            mode='markers+text',
+            hoverinfo='text',
+            text=node_text,
+            textposition="bottom center",
+            marker=dict(
+                size=node_size,
+                color=node_color,
+                line=dict(width=2, color='darkgray')
+            ),
+            showlegend=False
+        )
+        
+        # Create figure
+        fig = go.Figure(data=[edge_trace, node_trace],
+                       layout=go.Layout(
+                           title='Ontology Knowledge Graph',
+                           titlefont_size=16,
+                           showlegend=False,
+                           hovermode='closest',
+                           margin=dict(b=20,l=5,r=5,t=40),
+                           annotations=[ dict(
+                               text=f"Graph: {network_data['node_count']} nodes, {network_data['edge_count']} edges",
+                               showarrow=False,
+                               xref="paper", yref="paper",
+                               x=0.005, y=-0.002 ) ],
+                           xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                           yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+                           template="plotly_dark"
+                       ))
+        
+        return fig
+        
+    except Exception as e:
+        log_step(f"Error creating knowledge graph: {e}")
+        # Return error figure
+        fig = go.Figure()
+        fig.add_annotation(
+            text=f"Error creating graph: {str(e)}",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=14)
+        )
+        fig.update_layout(
+            title="Knowledge Graph Visualization",
+            template="plotly_dark",
+            showlegend=False
+        )
+        return fig
+
+
 # ─────────────────────────────────────────────
 # Master Callback: Ontology + Chart Engine
 # 22 Outputs → 18 Graphs + 4 Insight Panels
@@ -1649,7 +1883,7 @@ def update_button_text(mode):
         "bollinger-bands-chart", "macd-chart", "stochastic-oscillator-chart", "obv-chart",
         "atr-chart", "cci-chart", "mfi-chart", "cmf-chart", "fi-chart",
         "fibonacci-retracement-chart", "ichimoku-cloud-chart", "vwap-chart",
-        "adl-chart", "adx-di-chart"
+        "adl-chart", "adx-di-chart", "knowledge-graph-visualization"
     ]]
     + [Output(x, "children") for x in [
         "ontology-insights", "trading-signals", "risk-assessment",
@@ -1672,7 +1906,7 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
             title="Click 'Analyze' to Begin", template="plotly_dark"
         )
         placeholder = html.Div("Awaiting user input…")
-        return (empty_fig,) * 18 + (placeholder, html.Div(), html.Div(), html.Div(), html.Div())
+        return (empty_fig,) * 19 + (placeholder, html.Div(), html.Div(), html.Div(), html.Div())
 
     # ─────────────────────────────────────────────
     # Step 1 – Data Acquisition and Indicator Computation
@@ -1685,7 +1919,7 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
         log_step(f"❌ Data fetch error: {e}")
         err_fig = go.Figure().update_layout(title=f"Error: {e}", template="plotly_dark")
         err_msg = html.Div(f"⚠️ Error fetching data for {ticker}: {e}")
-        return (err_fig,) * 18 + (err_msg, html.Div(), html.Div(), html.Div(), html.Div())
+        return (err_fig,) * 19 + (err_msg, html.Div(), html.Div(), html.Div(), html.Div())
 
     # ─────────────────────────────────────────────
     # Step 2 – Enhanced Ontology Reasoning
@@ -1804,6 +2038,10 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
             html.P("Detected and resolved contradictions"),
             html.P("Aggregated evidence across multiple timeframes")
         ])
+        
+        # Create knowledge graph visualization
+        kg_figure = create_knowledge_graph_figure(ontology.ontology)
+        
     else:
         # Standard Mode (Indicator-Only)
         log_step("Standard mode selected – no ontology reasoning.")
@@ -1815,9 +2053,24 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
         risk_content = html.Div()
         recommendations_content = html.Div()
         reasoning_trace = html.Div()
+        
+        # Empty knowledge graph for standard mode
+        kg_figure = go.Figure()
+        kg_figure.add_annotation(
+            text="Knowledge Graph available in Ontology Analysis mode",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font=dict(size=16)
+        )
+        kg_figure.update_layout(
+            title="Knowledge Graph Visualization",
+            template="plotly_dark",
+            showlegend=False
+        )
 
     # ─────────────────────────────────────────────
-    # Step 3 – Chart Rendering (18 Charts)
+    # Step 3 – Chart Rendering (19 Charts)
     # ─────────────────────────────────────────────
     log_step("Rendering technical charts…")
 
@@ -1931,11 +2184,21 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
     fig_adl = go.Figure(go.Scatter(x=df.index, y=df.ADL, name="ADL"))
     fig_adl.update_layout(title=f"{ticker} Accumulation/Distribution Line", template="plotly_dark")
 
-    # ADX / DI Chart
+    # ADX / DI Chart (Updated colors: DI+ green, DI- red)
     fig_adx = go.Figure()
-    for col in ["ADX","DI+","DI-"]:
-        if col in df:
-            fig_adx.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
+    
+    # ADX line
+    if "ADX" in df:
+        fig_adx.add_trace(go.Scatter(x=df.index, y=df["ADX"], name="ADX", line=dict(color="yellow")))
+    
+    # DI+ line (GREEN)
+    if "DI+" in df:
+        fig_adx.add_trace(go.Scatter(x=df.index, y=df["DI+"], name="DI+", line=dict(color="green")))
+    
+    # DI- line (RED)
+    if "DI-" in df:
+        fig_adx.add_trace(go.Scatter(x=df.index, y=df["DI-"], name="DI-", line=dict(color="red")))
+    
     fig_adx.update_layout(title=f"{ticker} ADX & DI", template="plotly_dark")
 
     log_step("✅ Charts rendered successfully.")
@@ -1944,7 +2207,7 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
     return (
         fig_candle, fig_sma, fig_sr, fig_rsi, fig_bb, fig_macd, fig_sto, fig_obv,
         fig_atr, fig_cci, fig_mfi, fig_cmf, fig_fi, fig_fib, fig_ich, fig_vwap,
-        fig_adl, fig_adx,
+        fig_adl, fig_adx, kg_figure,
         insights_content, signals_content, risk_content,
         recommendations_content, reasoning_trace
     )
@@ -1955,4 +2218,4 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     log_step("🚀 Launching Enhanced Ontology-Driven Stock Dashboard (Final Patent Version)…")
-    app.run_server(debug=False, port=8050)
+    app.run_server(debug=False)
