@@ -12,3 +12,5 @@ pydantic
 pyshacl
 gunicorn
 owlrl
+networkx
+
