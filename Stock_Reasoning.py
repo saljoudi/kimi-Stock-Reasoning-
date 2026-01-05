@@ -1,3 +1,4 @@
+OLD 
 #!/usr/bin/env python
 # coding: utf-8
 
@@ -1931,12 +1932,38 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
     fig_adl = go.Figure(go.Scatter(x=df.index, y=df.ADL, name="ADL"))
     fig_adl.update_layout(title=f"{ticker} Accumulation/Distribution Line", template="plotly_dark")
 
-    # ADX / DI Chart
+    # ADX / DI Chart  ✅ FIXED COLORS
     fig_adx = go.Figure()
-    for col in ["ADX","DI+","DI-"]:
-        if col in df:
-            fig_adx.add_trace(go.Scatter(x=df.index, y=df[col], name=col))
-    fig_adx.update_layout(title=f"{ticker} ADX & DI", template="plotly_dark")
+
+    # ADX (trend strength – neutral)
+    fig_adx.add_trace(go.Scatter(
+        x=df.index,
+        y=df["ADX"],
+        name="ADX",
+        line=dict(color="#F1C40F", width=2)  # Gold / neutral
+    ))
+
+    # DI+ (bullish)
+    fig_adx.add_trace(go.Scatter(
+        x=df.index,
+        y=df["DI+"],
+        name="DI+",
+        line=dict(color="#2ECC71", width=2)  # GREEN
+    ))
+
+    # DI− (bearish)
+    fig_adx.add_trace(go.Scatter(
+        x=df.index,
+        y=df["DI-"],
+        name="DI−",
+        line=dict(color="#E74C3C", width=2)  # RED
+    ))
+
+    fig_adx.update_layout(
+        title=f"{ticker} ADX & Directional Indicators",
+        template="plotly_dark"
+    )
+
 
     log_step("✅ Charts rendered successfully.")
 
