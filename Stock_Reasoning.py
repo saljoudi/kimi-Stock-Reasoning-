@@ -1939,7 +1939,8 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
         x=df.index,
         y=df["ADX"],
         name="ADX",
-        line=dict(color="#F1C40F", width=2)  # Gold / neutral
+        line=dict(color="#3498DB", width=2)  # ✅ BLUE
+
     ))
 
     # DI+ (bullish)
