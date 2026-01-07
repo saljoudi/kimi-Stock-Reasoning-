@@ -75,7 +75,7 @@ RISK = Namespace("http://example.org/risk#")  # ✅ Added missing namespace
 
 
 # ─────────────────────────────────────────────
-# OWL Ontology Schema (Patent-Grade)
+# OWL Ontology Schema
 # ─────────────────────────────────────────────
 class EnhancedStockOntologyGraph:
     """
@@ -1459,7 +1459,7 @@ server = app.server
 app.layout = dbc.Container([
     # Navbar
     dbc.NavbarSimple(
-        brand="Enhanced Ontology-Driven Stock Dashboard (Patent Prototype)",
+        brand="Enhanced Ontology-Driven Stock Dashboard (Prototype)",
         color="dark",
         dark=True
     ),
@@ -1626,7 +1626,7 @@ app.layout = dbc.Container([
 ], fluid=True)
 
 # ============================================================
-# PART 4: CALLBACKS & APPLICATION EXECUTION (FINAL PATENT VERSION)
+# PART 4: CALLBACKS & APPLICATION EXECUTION (FINAL VERSION)
 # ============================================================
 
 # ─────────────────────────────────────────────
@@ -1981,5 +1981,5 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
 # Application Entrypoint
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    log_step("🚀 Launching Enhanced Ontology-Driven Stock Dashboard (Final Patent Version)…")
+    log_step("🚀 Launching Enhanced Ontology-Driven Stock Dashboard (Final Version)…")
     app.run_server(debug=False, port=8050)
