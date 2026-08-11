@@ -27,11 +27,17 @@
 #           ontology-level knowledge summary is passed through cleanly.
 
 from pyshacl import validate
+try:
+    from pyshacl import shacl_rules as apply_shacl_rules
+except ImportError:
+    apply_shacl_rules = None
 
 # ─────────────────────────────────────────────
 # STANDARD LIBRARY IMPORTS
 # ─────────────────────────────────────────────
 import os
+import re
+import hashlib
 import warnings
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -54,7 +60,7 @@ from rdflib.namespace import DefinedNamespace
 
 import dash
 import dash_bootstrap_components as dbc
-from dash import dcc, html, Dash, Input, Output, State
+from dash import dcc, html, Dash, Input, Output, State, no_update
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -66,6 +72,7 @@ warnings.filterwarnings("ignore")
 CACHE_DIR = "./cache_dir"
 os.makedirs(CACHE_DIR, exist_ok=True)
 memory = Memory(location=CACHE_DIR, verbose=0)
+DATA_CACHE_TTL_MINUTES = 15
 
 def log_step(message: str):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -94,6 +101,16 @@ class EnhancedStockOntologyGraph:
 
     def __init__(self):
         self.g = Graph()
+        # Relationship counts are frozen BEFORE confidence adjustment so the
+        # dashboard reports what was actually detected, not what survives a
+        # post-hoc threshold after penalties/boosts.
+        self._last_relationship_stats = {
+            "contradictions": 0,
+            "strong_contradictions": 0,
+            "confirmations": 0,
+            "strong_confirmations": 0,
+            "adjusted_indicators": 0,
+        }
         self._define_enhanced_schema()
         log_step("Enhanced OWL ontology schema initialized with temporal semantics.")
 
@@ -190,7 +207,9 @@ class EnhancedStockOntologyGraph:
             self.g.add((prop, RDFS.domain, domain))
             self.g.add((prop, RDFS.range, range_val))
             if prop in [STOCK.confirms, STOCK.contradicts]:
-                self.g.add((prop, RDF.type, OWL.TransitiveProperty))
+                # Confirmation/contradiction are pairwise symmetric relations,
+                # not logically transitive chains.
+                self.g.add((prop, RDF.type, OWL.SymmetricProperty))
             if prop in [STOCK.precedes]:
                 self.g.add((prop, RDF.type, OWL.TransitiveProperty))
                 self.g.add((prop, RDF.type, OWL.AsymmetricProperty))
@@ -285,63 +304,144 @@ class EnhancedStockOntologyGraph:
             contradictions.append((row.ind1, row.ind2, contradiction_strength))
         return contradictions
 
-    def find_confirmations(self, min_confidence: float = 0.7) -> List[Tuple[URIRef, URIRef]]:
-        """Finds strong confirmations between indicators."""
+    def _indicator_confidence(self, indicator_uri: URIRef) -> Optional[float]:
+        """Returns the current confidence attached to an indicator URI."""
+        confs = list(self.g.objects(indicator_uri, STOCK.hasConfidence))
+        if not confs:
+            return None
+        try:
+            return float(confs[0])
+        except (TypeError, ValueError):
+            return None
+
+    def find_confirmations(self, min_confidence: Optional[float] = None) -> List[Tuple[URIRef, URIRef]]:
+        """Finds unique confirmation relationships.
+
+        With ``min_confidence=None`` this returns ALL detected confirmations.
+        When a threshold is supplied, both indicators must have confidence
+        greater than or equal to that threshold.  Using >= is intentional:
+        signals defined at exactly 0.70 are valid strong confirmations.
+        """
         confirmations = []
-        query = f"""
-        SELECT ?ind1 ?ind2 WHERE {{
+        query = """
+        SELECT ?ind1 ?ind2 WHERE {
             ?ind1 stock:confirms ?ind2 .
-            ?ind1 stock:hasConfidence ?conf1 .
-            ?ind2 stock:hasConfidence ?conf2 .
-            FILTER(?conf1 > {min_confidence} && ?conf2 > {min_confidence})
-        }}
+        }
         """
         seen = set()
         for row in self.g.query(query, initNs={"stock": STOCK}):
             key = tuple(sorted([str(row.ind1), str(row.ind2)]))
             if key in seen:
                 continue
+
+            if min_confidence is not None:
+                conf1 = self._indicator_confidence(row.ind1)
+                conf2 = self._indicator_confidence(row.ind2)
+                if conf1 is None or conf2 is None:
+                    continue
+                if conf1 < min_confidence or conf2 < min_confidence:
+                    continue
+
             seen.add(key)
             confirmations.append((row.ind1, row.ind2))
         return confirmations
 
-    def apply_inference_rules(self):
-        """Applies semantic inference rules to derive new knowledge."""
-        contradictions = self.detect_contradictions()
-        for ind1, ind2, strength in contradictions:
-            self._resolve_contradiction(ind1, ind2, strength)
+    def _apply_aggregated_relationship_adjustments(
+        self,
+        confirmations: List[Tuple[URIRef, URIRef]],
+        contradictions: List[Tuple[URIRef, URIRef, float]],
+    ) -> int:
+        """Adjust each indicator confidence ONCE using aggregate evidence.
 
-        confirmations = self.find_confirmations()
+        The previous implementation multiplied an indicator's confidence once
+        for every contradictory pair.  With many pairwise links this could
+        collapse confidence toward zero before confirmations were counted.
+        Here, all relationship evidence is aggregated first and each indicator
+        receives a single bounded adjustment (max +10%, max -20%).
+        """
+        evidence: Dict[URIRef, Dict[str, List[float]]] = {}
+
+        def add(indicator: URIRef, kind: str, strength: float):
+            bucket = evidence.setdefault(indicator, {"confirm": [], "contradict": []})
+            bucket[kind].append(float(np.clip(strength, 0.0, 1.0)))
+
+        # Snapshot confirmation strengths BEFORE any graph confidence changes.
         for ind1, ind2 in confirmations:
-            self._strengthen_confirmation(ind1, ind2)
+            conf1 = self._indicator_confidence(ind1)
+            conf2 = self._indicator_confidence(ind2)
+            if conf1 is None or conf2 is None:
+                continue
+            strength = min(conf1, conf2)
+            add(ind1, "confirm", strength)
+            add(ind2, "confirm", strength)
+
+        for ind1, ind2, strength in contradictions:
+            add(ind1, "contradict", strength)
+            add(ind2, "contradict", strength)
+
+        adjusted = 0
+        for indicator, buckets in evidence.items():
+            conf_literal = next(iter(self.g.objects(indicator, STOCK.hasConfidence)), None)
+            if conf_literal is None:
+                continue
+            try:
+                base_conf = float(conf_literal)
+            except (TypeError, ValueError):
+                continue
+
+            confirm_total = sum(buckets["confirm"])
+            contradict_total = sum(buckets["contradict"])
+            total_strength = confirm_total + contradict_total
+            relationship_n = len(buckets["confirm"]) + len(buckets["contradict"])
+            if total_strength <= 0 or relationship_n == 0:
+                continue
+
+            support_share = confirm_total / total_strength
+            conflict_share = contradict_total / total_strength
+            evidence_strength = min(total_strength / relationship_n, 1.0)
+
+            # One bounded update per indicator.  Contradiction has a somewhat
+            # larger effect than confirmation, but repeated pairs cannot compound.
+            delta = evidence_strength * (0.10 * support_share - 0.20 * conflict_share)
+            new_conf = float(np.clip(base_conf * (1.0 + delta), 0.0, 1.0))
+
+            self.g.remove((indicator, STOCK.hasConfidence, conf_literal))
+            self.g.add((indicator, STOCK.hasConfidence, Literal(new_conf)))
+            adjusted += 1
+
+        return adjusted
+
+    def apply_inference_rules(self, strong_threshold: float = 0.70):
+        """Count relationships first, then apply one aggregate adjustment."""
+        # IMPORTANT: all counts below are based on ORIGINAL indicator confidence.
+        raw_contradictions = self.detect_contradictions()
+        raw_confirmations = self.find_confirmations(min_confidence=None)
+
+        strong_contradictions = [
+            c for c in raw_contradictions if c[2] >= strong_threshold
+        ]
+        strong_confirmations = self.find_confirmations(min_confidence=strong_threshold)
+
+        adjusted_n = self._apply_aggregated_relationship_adjustments(
+            raw_confirmations, raw_contradictions
+        )
+
+        self._last_relationship_stats = {
+            "contradictions": len(raw_contradictions),
+            "strong_contradictions": len(strong_contradictions),
+            "confirmations": len(raw_confirmations),
+            "strong_confirmations": len(strong_confirmations),
+            "adjusted_indicators": adjusted_n,
+            "strong_threshold": strong_threshold,
+        }
 
         log_step(
-            f"Inference rules applied: {len(contradictions)} contradiction "
-            f"resolutions, {len(confirmations)} confirmation strengthenings"
+            "Inference rules applied: "
+            f"{len(raw_contradictions)} contradictions ({len(strong_contradictions)} strong), "
+            f"{len(raw_confirmations)} confirmations ({len(strong_confirmations)} strong); "
+            f"confidence adjusted once for {adjusted_n} indicators"
         )
-        return {"contradictions": len(contradictions), "confirmations": len(confirmations)}
-
-    def _resolve_contradiction(self, ind1: URIRef, ind2: URIRef, strength: float):
-        """Reduces confidence on both sides of a contradiction."""
-        for ind in [ind1, ind2]:
-            confs = list(self.g.objects(ind, STOCK.hasConfidence))
-            if not confs:
-                continue
-            current_conf = confs[0]
-            new_conf = float(current_conf) * (1 - strength * 0.3)
-            self.g.remove((ind, STOCK.hasConfidence, current_conf))
-            self.g.add((ind, STOCK.hasConfidence, Literal(new_conf)))
-
-    def _strengthen_confirmation(self, ind1: URIRef, ind2: URIRef):
-        """Boosts confidence on confirmed indicators (capped at 1.0)."""
-        for ind in [ind1, ind2]:
-            confs = list(self.g.objects(ind, STOCK.hasConfidence))
-            if not confs:
-                continue
-            current_conf = confs[0]
-            new_conf = min(float(current_conf) * 1.1, 1.0)
-            self.g.remove((ind, STOCK.hasConfidence, current_conf))
-            self.g.add((ind, STOCK.hasConfidence, Literal(new_conf)))
+        return dict(self._last_relationship_stats)
 
     def query_knowledge(self, query: str, init_ns: Dict = None) -> List:
         if init_ns is None:
@@ -362,9 +462,11 @@ class EnhancedStockOntologyGraph:
         except Exception as e:
             log_step(f"OWL RL inference warning: {e}")
 
-        # ── SHACL rule-based inference (now with :prefix declared → rules parse)
+        # ── SHACL rule-based inference
+        # sh:condition must reference a well-formed SHACL shape.  Each rule
+        # below therefore points to a named NodeShape condition.
         try:
-            shacl_rules = """
+            shacl_rules_ttl = """
             @prefix sh:     <http://www.w3.org/ns/shacl#> .
             @prefix xsd:    <http://www.w3.org/2001/XMLSchema#> .
             @prefix stock:  <http://example.org/stock#> .
@@ -372,12 +474,68 @@ class EnhancedStockOntologyGraph:
             @prefix market: <http://example.org/market#> .
             @prefix :       <http://example.org/rules#> .
 
+            :RSIOverboughtCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasNumericValue ;
+                    sh:minInclusive 70
+                ] .
+
+            :RSIOversoldCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasNumericValue ;
+                    sh:maxInclusive 30
+                ] .
+
+            :MACDBullishCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasSignal ;
+                    sh:hasValue "bullish_crossover"
+                ] .
+
+            :MACDBearishCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasSignal ;
+                    sh:hasValue "bearish_crossover"
+                ] .
+
+            :ADXStrongCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasNumericValue ;
+                    sh:minInclusive 25
+                ] .
+
+            :ADXWeakCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasNumericValue ;
+                    sh:maxInclusive 20
+                ] .
+
+            :VolumeAccumulationCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasSignal ;
+                    sh:hasValue "accumulation"
+                ] .
+
+            :VolumeDistributionCondition
+                a sh:NodeShape ;
+                sh:property [
+                    sh:path stock:hasSignal ;
+                    sh:hasValue "distribution"
+                ] .
+
             :RSIOverboughtRule
                 a sh:NodeShape ;
                 sh:targetClass tech:RSI ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasNumericValue ; sh:minInclusive 70 ] ;
+                    sh:condition :RSIOverboughtCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BearTrend ;
@@ -388,7 +546,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:RSI ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasNumericValue ; sh:maxInclusive 30 ] ;
+                    sh:condition :RSIOversoldCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BullTrend ;
@@ -399,7 +557,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:MACD ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasSignal ; sh:hasValue "bullish_crossover" ] ;
+                    sh:condition :MACDBullishCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BullTrend ;
@@ -410,7 +568,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:MACD ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasSignal ; sh:hasValue "bearish_crossover" ] ;
+                    sh:condition :MACDBearishCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BearTrend ;
@@ -421,7 +579,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:ADX ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasNumericValue ; sh:minInclusive 25 ] ;
+                    sh:condition :ADXStrongCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BullTrend ;
@@ -432,7 +590,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:ADX ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasNumericValue ; sh:maxInclusive 20 ] ;
+                    sh:condition :ADXWeakCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:RangeBound ;
@@ -443,7 +601,7 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:OBV ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasSignal ; sh:hasValue "accumulation" ] ;
+                    sh:condition :VolumeAccumulationCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BullTrend ;
@@ -454,24 +612,34 @@ class EnhancedStockOntologyGraph:
                 sh:targetClass tech:OBV ;
                 sh:rule [
                     a sh:TripleRule ;
-                    sh:condition [ sh:path stock:hasSignal ; sh:hasValue "distribution" ] ;
+                    sh:condition :VolumeDistributionCondition ;
                     sh:subject   sh:this ;
                     sh:predicate stock:impliesState ;
                     sh:object    market:BearTrend ;
                 ] .
             """
 
-            conforms, results_graph, results_text = validate(
-                self.g,
-                shacl_graph=shacl_rules,
-                shacl_graph_format="turtle",
-                inference="rdfs",
-                advanced=True,
-                debug=False
-            )
-            if results_graph is not None:
-                self.g += results_graph
-            log_step("SHACL reasoning completed successfully.")
+            if apply_shacl_rules is not None:
+                # Dedicated rules-expander returns the data graph plus inferred triples.
+                self.g = apply_shacl_rules(
+                    self.g,
+                    shacl_graph=shacl_rules_ttl,
+                    shacl_graph_format="turtle",
+                    advanced=True,
+                    iterate_rules=True,
+                )
+            else:
+                # Compatibility fallback for older pySHACL versions.
+                validate(
+                    self.g,
+                    shacl_graph=shacl_rules_ttl,
+                    shacl_graph_format="turtle",
+                    inference="rdfs",
+                    advanced=True,
+                    debug=False,
+                    inplace=True,
+                )
+            log_step("SHACL rule inference completed successfully.")
         except Exception as e:
             log_step(f"SHACL reasoning error: {e}")
 
@@ -486,16 +654,21 @@ class EnhancedStockOntologyGraph:
         return self.export_knowledge(format=format)
 
     def get_knowledge_summary(self) -> Dict[str, Any]:
-        """Returns summary statistics of the knowledge graph."""
+        """Returns graph statistics plus pre-adjustment relationship counts."""
+        stats = dict(self._last_relationship_stats or {})
         return {
-            "total_statements":   len(self.g),
-            "indicators":         len(list(self.g.subjects(RDF.type, STOCK.Indicator))),
-            "signals":            len(list(self.g.subjects(RDF.type, STOCK.Signal))),
-            "evidence_bundles":   len(list(self.g.subjects(RDF.type, EVIDENCE.EvidenceBundle))),
-            "market_states":      len(list(self.g.subjects(RDF.type, MARKET.MarketState))),
-            "risk_assessments":   len(list(self.g.subjects(RDF.type, RISK.RiskAssessment))),
-            "contradictions":     len(self.detect_contradictions()),
-            "confirmations":      len(self.find_confirmations())
+            "total_statements":      len(self.g),
+            "indicators":            len(list(self.g.subjects(RDF.type, STOCK.Indicator))),
+            "signals":               len(list(self.g.subjects(RDF.type, STOCK.Signal))),
+            "evidence_bundles":      len(list(self.g.subjects(RDF.type, EVIDENCE.EvidenceBundle))),
+            "market_states":         len(list(self.g.subjects(RDF.type, MARKET.MarketState))),
+            "risk_assessments":      len(list(self.g.subjects(RDF.type, RISK.RiskAssessment))),
+            "contradictions":        stats.get("contradictions", len(self.detect_contradictions())),
+            "strong_contradictions": stats.get("strong_contradictions", 0),
+            "confirmations":         stats.get("confirmations", len(self.find_confirmations(None))),
+            "strong_confirmations":  stats.get("strong_confirmations", 0),
+            "adjusted_indicators":   stats.get("adjusted_indicators", 0),
+            "strong_threshold":      stats.get("strong_threshold", 0.70),
         }
 
 
@@ -510,7 +683,7 @@ class EnhancedStockAnalysisOntology:
 
     def __init__(self, debug: bool = False):
         self.debug = debug
-        self.version = "7.1-owl-enhanced"
+        self.version = "7.2-relationship-balance"
         self._context_cache: Dict[str, "MarketContext"] = {}
         self.ontology = EnhancedStockOntologyGraph()
 
@@ -538,7 +711,13 @@ class EnhancedStockAnalysisOntology:
     # ------------------------------------------------------------
     def infer_market_context(self, symbol: str, df: pd.DataFrame) -> "MarketContext":
         """Main pipeline with full indicator coverage."""
-        cache_key = f"{symbol}_{len(df)}_{df.index[-1].strftime('%Y%m%d')}"
+        fingerprint_cols = [c for c in ["open", "high", "low", "close", "volume"] if c in df.columns]
+        if fingerprint_cols:
+            hashed = pd.util.hash_pandas_object(df[fingerprint_cols], index=True).values.tobytes()
+            data_fingerprint = hashlib.sha256(hashed).hexdigest()[:20]
+        else:
+            data_fingerprint = hashlib.sha256(str((len(df), df.index[-1])).encode()).hexdigest()[:20]
+        cache_key = f"{symbol}_{data_fingerprint}"
         if cache_key in self._context_cache:
             return self._context_cache[cache_key]
 
@@ -614,7 +793,7 @@ class EnhancedStockAnalysisOntology:
             knowledge_summary=summary,
             confirmations=[
                 {"indicator1": str(c[0]), "indicator2": str(c[1])}
-                for c in self.ontology.find_confirmations()
+                for c in self.ontology.find_confirmations(min_confidence=None)
             ]
         )
 
@@ -1288,11 +1467,15 @@ class EnhancedStockAnalysisOntology:
         if contradictions:
             chain.append(f"⚠️ Detected {len(contradictions)} indicator contradictions")
 
-        confirmations = self.ontology.find_confirmations()
-        if confirmations:
-            chain.append(f"✅ Found {len(confirmations)} strong indicator confirmations")
-
         summary = self.ontology.get_knowledge_summary()
+        if summary.get("confirmations", 0):
+            chain.append(f"✅ Detected {summary['confirmations']} indicator confirmations")
+        if summary.get("strong_confirmations", 0):
+            chain.append(
+                f"💪 {summary['strong_confirmations']} confirmations meet the "
+                f"≥{summary.get('strong_threshold', 0.70):.0%} strong-evidence threshold"
+            )
+
         chain.append(
             f"📊 Knowledge Graph: {summary['total_statements']} statements, "
             f"{summary['indicators']} indicators, "
@@ -1398,7 +1581,9 @@ ontology = enhanced_ontology
 
 
 @memory.cache
-def fetch_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
+def _fetch_data_cached_bucket(ticker: str, period: str, interval: str, cache_bucket: int) -> pd.DataFrame:
+    # cache_bucket intentionally participates in the cache key, giving the
+    # otherwise persistent joblib cache a bounded lifetime.
     log_step(f"Fetching data for {ticker} | Period={period} | Interval={interval}")
     tq = Ticker(ticker)
     df = tq.history(period=period, interval=interval)
@@ -1407,6 +1592,12 @@ def fetch_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
     df = df.dropna(subset=["close"])
     log_step(f"Retrieved {len(df)} rows for {ticker}.")
     return df
+
+
+def fetch_data_cached(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    ttl_seconds = max(DATA_CACHE_TTL_MINUTES, 1) * 60
+    cache_bucket = int(datetime.now().timestamp() // ttl_seconds)
+    return _fetch_data_cached_bucket(ticker, period, interval, cache_bucket)
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -1458,6 +1649,157 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 # ─────────────────────────────────────────────
 # Dash Application Setup (unchanged)
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# USER DRAWING STATE & INSIGHT HELPERS
+# ─────────────────────────────────────────────
+def _drawing_key(ticker: str, period: str, interval: str) -> str:
+    return f"{(ticker or '').strip().upper()}|{period}|{interval}"
+
+
+def _set_nested_shape_value(shape: Dict[str, Any], dotted_key: str, value: Any):
+    parts = dotted_key.split(".")
+    cursor = shape
+    for part in parts[:-1]:
+        cursor = cursor.setdefault(part, {})
+    if value is None:
+        cursor.pop(parts[-1], None)
+    else:
+        cursor[parts[-1]] = value
+
+
+def _merge_shape_relayout(existing_shapes: List[Dict[str, Any]], relayout_data: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """Merge Plotly relayoutData shape events into a persistent shape list."""
+    if not relayout_data:
+        return None
+
+    # Plotly often sends the complete shapes list after create/delete operations.
+    if "shapes" in relayout_data:
+        raw = relayout_data.get("shapes") or []
+        return [dict(s) for s in raw if isinstance(s, dict)]
+
+    shape_keys = [k for k in relayout_data if k.startswith("shapes[")]
+    if not shape_keys:
+        return None
+
+    shapes = [dict(s) for s in (existing_shapes or [])]
+    removals = set()
+
+    for key in shape_keys:
+        match = re.match(r"^shapes\[(\d+)\](?:\.(.+))?$", key)
+        if not match:
+            continue
+        idx = int(match.group(1))
+        prop = match.group(2)
+        value = relayout_data[key]
+
+        while len(shapes) <= idx:
+            shapes.append({})
+
+        if prop is None:
+            if value is None:
+                removals.add(idx)
+            elif isinstance(value, dict):
+                shapes[idx] = dict(value)
+        else:
+            _set_nested_shape_value(shapes[idx], prop, value)
+
+    if removals:
+        shapes = [s for i, s in enumerate(shapes) if i not in removals]
+    return [s for s in shapes if s]
+
+
+def _safe_float(value) -> Optional[float]:
+    try:
+        value = float(value)
+        return value if np.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _shape_insight_lines(shapes: List[Dict[str, Any]], df: pd.DataFrame, context: Optional["MarketContext"] = None) -> List[str]:
+    if not shapes or df is None or df.empty:
+        return []
+
+    current_price = _safe_float(df["close"].iloc[-1])
+    if current_price is None:
+        return []
+
+    lines = [f"{len(shapes)} user drawing(s) detected; current close {current_price:.2f}."]
+    ontology_trend = context.trend_direction.value if context is not None else "unknown"
+
+    for i, shape in enumerate(shapes, start=1):
+        shape_type = shape.get("type", "path")
+        y0, y1 = _safe_float(shape.get("y0")), _safe_float(shape.get("y1"))
+
+        if shape_type == "line" and y0 is not None and y1 is not None:
+            avg_level = (y0 + y1) / 2.0
+            delta_pct = abs(y1 - y0) / max(abs(avg_level), 1e-9)
+            if delta_pct <= 0.005:
+                distance_pct = (current_price - avg_level) / max(abs(avg_level), 1e-9) * 100
+                if abs(distance_pct) <= 0.5:
+                    role = "price is testing this level"
+                elif current_price < avg_level:
+                    role = f"potential resistance, {abs(distance_pct):.2f}% above price"
+                else:
+                    role = f"potential support, {abs(distance_pct):.2f}% below price"
+                lines.append(f"Drawing {i}: horizontal level near {avg_level:.2f} — {role}.")
+            else:
+                x0 = pd.to_datetime(shape.get("x0"), errors="coerce")
+                x1 = pd.to_datetime(shape.get("x1"), errors="coerce")
+                signed_move = y1 - y0
+                if not pd.isna(x0) and not pd.isna(x1) and x1 < x0:
+                    signed_move *= -1
+                direction = "rising" if signed_move > 0 else "falling"
+                agreement = ""
+                if ontology_trend != "unknown":
+                    ontology_up = "up" in ontology_trend
+                    ontology_down = "down" in ontology_trend
+                    agrees = (direction == "rising" and ontology_up) or (direction == "falling" and ontology_down)
+                    conflicts = (direction == "rising" and ontology_down) or (direction == "falling" and ontology_up)
+                    if agrees:
+                        agreement = f"; agrees with ontology trend ({ontology_trend})"
+                    elif conflicts:
+                        agreement = f"; conflicts with ontology trend ({ontology_trend})"
+                lines.append(f"Drawing {i}: {direction} trend line{agreement}.")
+
+        elif shape_type in {"rect", "circle"} and y0 is not None and y1 is not None:
+            low, high = sorted((y0, y1))
+            if low <= current_price <= high:
+                relation = "price is inside the drawn zone"
+            elif current_price < low:
+                relation = f"zone is {(low-current_price)/current_price*100:.2f}% above price"
+            else:
+                relation = f"zone is {(current_price-high)/current_price*100:.2f}% below price"
+            label = "rectangle zone" if shape_type == "rect" else "highlighted range"
+            lines.append(f"Drawing {i}: {label} {low:.2f}–{high:.2f}; {relation}.")
+
+        elif shape_type == "path" or shape.get("path"):
+            lines.append(f"Drawing {i}: freeform/closed pattern captured and preserved for visual pattern review.")
+        else:
+            lines.append(f"Drawing {i}: {shape_type} drawing captured and preserved.")
+
+    # Compact objective indicator context to support interpretation of drawings.
+    rsi = _safe_float(df["RSI"].iloc[-1]) if "RSI" in df.columns else None
+    adx = _safe_float(df["ADX"].iloc[-1]) if "ADX" in df.columns else None
+    macd = _safe_float(df["MACD"].iloc[-1]) if "MACD" in df.columns else None
+    macd_sig = _safe_float(df["MACD_Signal"].iloc[-1]) if "MACD_Signal" in df.columns else None
+    context_bits = []
+    if rsi is not None:
+        context_bits.append(f"RSI {rsi:.1f}")
+    if adx is not None:
+        context_bits.append(f"ADX {adx:.1f}")
+    if macd is not None and macd_sig is not None:
+        context_bits.append("MACD above signal" if macd > macd_sig else "MACD below signal")
+    if context is not None:
+        context_bits.append(f"ontology trend {ontology_trend}")
+        context_bits.append(f"market state {context.market_state.value}")
+    if context_bits:
+        lines.append("Indicator context: " + "; ".join(context_bits) + ".")
+
+    return lines
+
+
+
 app = dash.Dash(
     __name__,
     external_stylesheets=[dbc.themes.SOLAR],
@@ -1471,6 +1813,7 @@ server = app.server
 # Dash Layout (UNCHANGED — same widgets, IDs, order)
 # ─────────────────────────────────────────────
 app.layout = dbc.Container([
+    dcc.Store(id="drawing-store", storage_type="memory", data={}),
     dbc.NavbarSimple(
         brand="Enhanced Ontology-Driven Stock Dashboard (Prototype)",
         color="dark", dark=True
@@ -1535,7 +1878,20 @@ app.layout = dbc.Container([
         ]), width=12)
     ], className="mb-4"),
 
-    dbc.Row([dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="candlestick-chart"))), width=12)], className="mb-4"),
+    dbc.Row([dbc.Col(dbc.Card(dbc.CardBody([
+        dcc.Graph(
+            id="candlestick-chart",
+            config={
+                "modeBarButtonsToAdd": [
+                    "drawline", "drawopenpath", "drawclosedpath",
+                    "drawrect", "drawcircle", "eraseshape"
+                ],
+                "modeBarButtonsToRemove": ["select2d", "lasso2d"],
+                "displaylogo": False,
+            },
+        ),
+        html.Div(id="drawing-insights", className="mt-2"),
+    ])), width=12)], className="mb-4"),
     dbc.Row([dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="sma-ema-chart"))), width=12)], className="mb-4"),
     dbc.Row([
         dbc.Col(dbc.Card(dbc.CardBody(dcc.Graph(id="support-resistance-chart"))), width=6),
@@ -1587,6 +1943,55 @@ def update_button_text(mode):
 
 
 @app.callback(
+    Output("drawing-store", "data"),
+    Input("candlestick-chart", "relayoutData"),
+    State("drawing-store", "data"),
+    State("stock-input", "value"),
+    State("time-range", "value"),
+    State("interval", "value"),
+    prevent_initial_call=True,
+)
+def capture_chart_drawings(relayout_data, store_data, ticker, time_range, interval):
+    if not relayout_data:
+        return no_update
+    key = _drawing_key(ticker, time_range, interval)
+    store = dict(store_data or {})
+    merged = _merge_shape_relayout(store.get(key, []), relayout_data)
+    if merged is None:
+        return no_update
+    store[key] = merged
+    return store
+
+
+@app.callback(
+    Output("drawing-insights", "children"),
+    Input("drawing-store", "data"),
+    Input("analyze-button", "n_clicks"),
+    State("stock-input", "value"),
+    State("time-range", "value"),
+    State("interval", "value"),
+    State("analysis-mode", "value"),
+    prevent_initial_call=True,
+)
+def update_drawing_insights(store_data, n_clicks, ticker, time_range, interval, analysis_mode):
+    key = _drawing_key(ticker, time_range, interval)
+    shapes = (store_data or {}).get(key, [])
+    if not shapes:
+        return html.Div("Draw a trend line, level, zone, or pattern to generate drawing-aware insights.", className="text-muted")
+    try:
+        df = compute_indicators(fetch_data_cached(ticker, time_range, interval))
+        context = ontology.infer_market_context(ticker, df) if analysis_mode == "ontology" else None
+        insight_lines = _shape_insight_lines(shapes, df, context)
+        return html.Div([
+            html.H6("✏️ Drawing-Aware Insights"),
+            html.Ul([html.Li(line) for line in insight_lines]),
+        ])
+    except Exception as e:
+        log_step(f"Drawing insight error: {e}")
+        return html.Div(f"Drawing captured, but insight calculation failed: {e}", className="text-warning")
+
+
+@app.callback(
     [Output(g, "figure") for g in [
         "candlestick-chart", "sma-ema-chart", "support-resistance-chart", "rsi-chart",
         "bollinger-bands-chart", "macd-chart", "stochastic-oscillator-chart", "obv-chart",
@@ -1603,8 +2008,9 @@ def update_button_text(mode):
     State("time-range", "value"),
     State("interval", "value"),
     State("analysis-mode", "value"),
+    State("drawing-store", "data"),
 )
-def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
+def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode, drawing_store):
     if not n_clicks:
         empty_fig = go.Figure().update_layout(
             title="Click 'Analyze' to Begin", template="plotly_dark"
@@ -1658,7 +2064,10 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
             html.P(f"Indicators: {kg_summary.get('indicators', 0)}"),
             html.P(f"Evidence Bundles: {kg_summary.get('evidence_bundles', 0)}"),
             html.P(f"Contradictions Detected: {kg_summary.get('contradictions', len(context.contradictions))}"),
+            html.P(f"Strong Contradictions (≥70%): {kg_summary.get('strong_contradictions', 0)}"),
             html.P(f"Confirmations Detected: {kg_summary.get('confirmations', len(context.confirmations))}"),
+            html.P(f"Strong Confirmations (≥70%): {kg_summary.get('strong_confirmations', 0)}"),
+            html.P(f"Indicators Confidence-Adjusted: {kg_summary.get('adjusted_indicators', 0)}"),
             html.P(f"Reasoning Steps: {len(reasoning_chain)}")
         ])
 
@@ -1753,9 +2162,17 @@ def update_graphs(n_clicks, ticker, time_range, interval, analysis_mode):
     # ─────────────────────────────────────────────
     log_step("Rendering technical charts…")
 
+    chart_key = _drawing_key(ticker, time_range, interval)
+    persisted_shapes = (drawing_store or {}).get(chart_key, [])
     fig_candle = go.Figure(go.Candlestick(
         x=df.index, open=df.open, high=df.high, low=df.low, close=df.close
-    )).update_layout(title=f"{ticker} Candlestick", template="plotly_dark")
+    )).update_layout(
+        title=f"{ticker} Candlestick",
+        template="plotly_dark",
+        shapes=persisted_shapes,
+        uirevision=chart_key,
+        newshape=dict(opacity=0.35),
+    )
 
     fig_sma = go.Figure()
     fig_sma.add_trace(go.Scatter(x=df.index, y=df.close, name="Close"))
